@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+*.egg-info/
+.venv/
+
+# Tasks contain private thread IDs, messages, and runtime state.
+/tasks/
+
+.wake-codex.lock
+.wake-codex-state.json
