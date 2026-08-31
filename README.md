@@ -1,24 +1,24 @@
 # wake-codex
 
-`wake-codex` 周期性执行 task 自带的 trigger。当 trigger 返回 go 后，工具读取
-task 当前的消息文件，并通过 `codex queue` 把消息排到目标线程的下一轮。默认的
-`queue-only` 模式兼容普通 Codex TUI；需要强制确认共享 app-server loaded 状态时可用
-`strict` 模式。
+`wake-codex` 执行 task 自带的 trigger，并在 trigger 返回 go 后通过 `codex queue`
+向目标线程提交消息。它支持两种运行方式：原有的前台 one-shot runner，以及可同时管理
+多个 cron task 的 foreground daemon。
 
-工具是前台、单 task、一次性进程。需要后台运行时使用 tmux、nohup 或 systemd；
-它本身不管理 daemon 或 PID 文件。
+## 安装
 
-## 环境
-
-激活已安装项目依赖的 Python 环境，并把 Codex 工具目录加入 `PATH`：
+在准备运行该工具的 Python 环境中安装项目及依赖，并将项目入口加入 `PATH`：
 
 ```bash
+python -m pip install .
 export PATH="/path/to/wake-codex/bin:${PATH}"
 ```
 
+也可以使用 `pyproject.toml` 安装生成的 `wake-codex` console script。daemon 与所有 client
+命令必须使用包含 `PyYAML` 和 `croniter` 的环境。
+
 ## Task 格式
 
-每个 task 是一个独立目录，必须包含固定名称 `task.yaml`：
+每个 task 是一个独立目录，固定使用 `task.yaml`：
 
 ```yaml
 version: 1
@@ -26,135 +26,133 @@ name: my-task
 thread_id: 123e4567-e89b-42d3-a456-426614174000
 trigger: trigger.sh
 message: message.txt
+schedule: "*/5 * * * *"
+timezone: Asia/Shanghai
+lifecycle: once
+mode: queue-only
 ```
 
-- `trigger` 和 `message` 必须是 task 目录内的相对路径，不能逃逸到目录外。
-- `thread_id` 必须是小写、带连字符的规范 UUID。启动时会把目标分成 active、
-  archived 和 missing：`sessions/` 中的 active session（或仍在 index 中的 session）
-  才能继续；`archived_sessions/` 中的 session 和 missing session 都以退出码 2
-  拒绝，且不执行 trigger。archived transcript 不再是可投递目标。
-- trigger 必须带有 shebang 且可执行。runner 直接执行它，不使用 shell 解释 YAML。
-- trigger 退出码 `0` 表示 go，`1` 表示 block，其他退出码表示可重试错误。
-- `message.txt` 使用 UTF-8。runner 不修改该文件，并在每次即将调用 queue 时重新读取。
-- 空消息、临时不可读消息、trigger 错误和临时 queue 错误会按轮询间隔重试。
-  queue 明确返回 session archived、not loaded 或 not found 时是不可重试的配置错误。
-- `task.yaml` 在启动时读取一次；运行中只保证消息文件可以安全更新。
+`trigger` 和 `message` 必须是 task 目录内的相对路径。trigger 必须带 shebang 且可执行；
+退出码 `0` 表示 go，`1` 表示 block，其他值表示检查错误。消息必须是非空 UTF-8 文本。
+`thread_id` 必须是小写 canonical UUID。
 
-## 活跃检查模式
+daemon submit 要求五字段 `schedule`。`timezone` 是可选 IANA 时区，默认 daemon 所在机器
+的本地时区。`lifecycle` 默认为 `once`：queue 成功后结束；`continuous` 使用边沿触发：
+初始为 armed，go 只投递一次，此后必须实际观察到 block 才会重新 armed。
 
-`--mode queue-only` 是默认模式：不调用 `thread/loaded/list`，也不使用远程
-app-server 参数。trigger 返回 go 后直接执行：
+task 通过目录引用注册。提交时冻结 YAML 中的名称、线程、schedule、时区、生命周期、
+模式以及 trigger/message 路径；修改这些字段后需要 cancel 并重新 submit。trigger 文件
+和 message 文件的内容在每次执行时重新读取，因此可以在 task 运行期间更新。消息正文
+不会写入 daemon 数据库或事件元数据。
+
+## Daemon
+
+daemon 始终在前台运行，本项目不提供 `start/status/stop` 包装。可先手动运行：
 
 ```bash
-codex queue --thread <thread_id> --message <message>
+wake-codex daemon --codex "$(command -v codex)"
 ```
 
-它兼容普通 TUI，但 queue 成功只代表消息已排队，不能证明当前存在消费该消息的
-Codex 进程。成功后 runner 默认输出提示：消息只有在目标会话存在活跃 Codex 进程时
-才会执行；否则请运行 `codex resume <thread_id>`。使用 `--silent 1` 可只隐藏这条提示。
-
-`--mode strict` 保留严格检查。目标 CLI/TUI 必须连接同一个 app-server endpoint，
-且目标线程必须出现在受支持的 `thread/loaded/list` 结果中。runner 在每次执行 trigger
-前和真正 queue 前各检查一次；连接失败、RPC 超时、响应不可解析或目标未 loaded 时
-均 fail closed，退出码为 2。strict queue 会通过 `--remote` 使用同一个 endpoint。
-工具不通过 `ps`、锁文件或 transcript 时间戳猜测活跃性。
-
-strict 默认使用 `unix://` control socket。自定义 socket 可使用
-`--app-server-endpoint unix:///absolute/path.sock`，并让目标 Codex 客户端连接同一
-endpoint。需要时可通过 `codex app-server daemon start` 启动受管 app-server。
-
-## 使用示例
-
-`tasks/` 用于本机真实任务并被 Git 完整忽略。复制脱敏模板后填写真实 session ID、
-Slurm job ID 和消息：
+另一个 terminal 中可以随时管理 task：
 
 ```bash
-cp -a tasks.example/slurm-jobs tasks/my-slurm-jobs
-${EDITOR:-vi} tasks/my-slurm-jobs/task.yaml tasks/my-slurm-jobs/trigger.sh tasks/my-slurm-jobs/message.txt
+wake-codex submit tasks/my-task
+wake-codex list
+wake-codex list --all --json
+wake-codex show TASK_ID
+wake-codex events TASK_ID --limit 50 --full
+wake-codex cancel TASK_ID
 ```
 
-前台启动：
+`submit` 注册后立即返回 task ID 和下次检查时间。ID 可以使用不歧义的 UUID 前缀；名称
+也可用于 `show/events/cancel`，但重复名称需要改用 ID。`list` 默认只显示 active task，
+`--all` 包含终态。
+
+daemon 默认最多并行执行 4 个不同 task，同一 task 永不重叠。可用
+`--max-workers`、`--command-timeout` 和 `--retry-interval` 调整。cron 漏跑不会逐次补跑：
+daemon 重启后会立即合并检查一次，再计算下一个 cron 时间。
+
+默认状态目录依次取 `WAKE_CODEX_HOME`、`XDG_STATE_HOME/wake-codex`、
+`~/.local/state/wake-codex`，所有 daemon client 命令都可用 `--state-dir` 覆盖。状态目录
+权限为 `0700`，Unix socket 为 `0600`。SQLite 使用 WAL。
+
+### systemd user service
+
+复制 `systemd/wake-codex.service.example` 到 `~/.config/systemd/user/wake-codex.service`，
+将 `@WAKE_CODEX@` 和 `@CODEX@` 替换为对应入口的绝对路径，然后执行：
 
 ```bash
-wake-codex \
-  --codex "$(command -v codex)" \
-  --poll-interval 60 \
-  --timeout -1 \
-  tasks/my-slurm-jobs
+systemctl --user daemon-reload
+systemctl --user enable --now wake-codex.service
+systemctl --user status wake-codex.service
 ```
 
-示例 trigger 使用 `sacct` 监控三个占位 job。所有 job 都进入 Slurm 终态后返回 go；
-至少一个 job 仍活跃时返回 block。可以用 `SACCT_BIN=/other/path/sacct` 覆盖入口。
+若机器没有可用的 user systemd session bus，可由 tmux、容器 supervisor 或其他进程
+管理器直接托管同一个 foreground daemon 命令。若需要退出登录后继续运行，系统管理员
+还可能需要为该用户启用 linger。
 
-`tasks.example/immediate` 是立即返回 go 的最小模板。两个 example 都使用 nil UUID 和
-极简消息，不包含真实 session、job 或业务信息。
+## 活跃检查
 
-## CLI
+`queue-only` 是默认模式，不调用 `thread/loaded/list`，兼容普通 Codex TUI。queue 成功
+只代表命令接受了消息；消息只有在目标会话存在活跃 Codex 进程时才会执行，否则需要
+运行 `codex resume <thread_id>`。one-shot runner 会打印这条 note，`--silent 1` 可隐藏。
 
-```text
-usage: wake-codex [-h] --codex CODEX [--codex-home CODEX_HOME]
-                  [--app-server-endpoint ENDPOINT]
-                  [--mode {queue-only,strict}] [--silent {0,1,2,3}]
-                  [--poll-interval SECONDS] [--timeout SECONDS]
-                  [--command-timeout SECONDS] [--force] task_folder
+`strict` 在 trigger 前和 queue 前分别通过受支持的 `thread/loaded/list` 检查 loaded
+状态，并让 queue 使用同一个 `--app-server-endpoint`。未 loaded、响应不可确认或检查
+失败都会 fail closed。检查和 queue 指向同一 endpoint，但 Codex 当前没有把两者合成
+原子操作的接口，二次检查后仍存在很短的关闭竞态；queue 自身的明确拒绝会覆盖该竞态。
+
+submit 始终先检查 session：`archived_sessions/` 中的 archived session 和不存在的
+session 都直接拒绝。它们不会执行 trigger，也不会成为离线投递目标。
+
+## 状态与故障语义
+
+daemon 在 task 目录持续持有 `.wake-codex.lock`，因此 active daemon task 不能同时由
+one-shot runner 执行。queue 前后仍写兼容的 `.wake-codex-state.json`；其中只有状态、
+次数和消息 SHA256，不含消息正文。
+
+- trigger block、超时或错误：记录事件，等待下一个 cron。
+- 临时 queue 错误或消息暂不可读：进入内部 retry，不重新执行 trigger。
+- archived、not loaded、not found：终态 `rejected`，不重试。
+- queue 超时、发送中 daemon 崩溃、发送中取消：终态 `ambiguous`，不自动重试。
+- scheduled/checking 取消：`cancelled`；发送中的取消：`ambiguous`。
+- 重启恢复时 checking 重新调度，retrying 立即到期，sending/cancelling 变为 ambiguous。
+
+每次 trigger、strict check 和 queue 的完整 stdout/stderr 都永久保存在 gzip artifact；
+数据库记录路径、大小和 SHA256。`show/events` 默认只显示摘要，`--full` 读取完整输出。
+没有自动 retention，可显式清理：
+
+```bash
+wake-codex purge outputs --older-than 30
+wake-codex purge outputs --task TASK_ID --type trigger --confirm
+wake-codex purge tasks --status delivered --before 2026-01-01T00:00:00+00:00
+wake-codex purge tasks --status delivered --before 2026-01-01T00:00:00+00:00 --confirm
 ```
 
-- `--codex-home` 指定用于验证会话的 Codex 状态目录。默认依次使用环境变量
-  `CODEX_HOME` 和 `~/.codex`；它必须与 `--codex` 入口实际使用的状态目录一致。
-- `--mode` 默认 `queue-only`；`strict` 启用两次 app-server loaded 检查。
-- `--silent` 接受 `0` 到 `3` 的整数，默认 `0`。级别是累加的：
+purge 默认 dry run，必须加 `--confirm` 才删除。output purge 保留事件元数据；task purge
+只处理 terminal task，并级联删除其事件和 artifacts。可按 task/type/status/时间或 age
+筛选。
 
-| level | 输出行为 |
-| ---: | --- |
-| 0 | 输出全部日志 |
-| 1 | 隐藏 queue-only 成功后的 note |
-| 2 | 在 level 1 基础上隐藏 trigger poll、消息等待和重试轮询输出 |
-| 3 | 只保留最终 queue 成功、timeout、明确错误或其他终止结果 |
+## One-shot runner
 
-  level 3 的 queue 成功行仍包含 Codex queue 的 stdout/stderr 摘要；配置错误和投递结果
-  不确定等重要终止信息不会被隐藏。
-- `--app-server-endpoint` 只用于 strict，默认 `unix://`，也接受
-  `unix:///absolute/path.sock`。活跃检查和 queue 固定使用同一个 endpoint。
-- `--poll-interval` 默认 60 秒，也用于 trigger/queue 错误后的重试。
-- `--timeout` 是整个进程的总超时；默认 `-1`，表示不超时。
-- `--command-timeout` 默认 30 秒，限制单次 trigger 或 queue 子进程。
-- `--force` 忽略已经投递或结果不确定的状态，允许再次发送。使用前应先检查
-  目标线程，避免重复消息。
+不带子命令的旧用法保持兼容，`schedule` 字段不是必需的：
 
-退出码：
+```bash
+wake-codex --codex "$(command -v codex)" --poll-interval 60 --timeout -1 tasks/my-task
+```
 
-| code | 含义 |
-| ---: | --- |
-| 0 | queue 成功 |
-| 2 | 参数、配置、session archived/missing/not loaded、路径或 Codex 预检/明确拒绝错误 |
-| 3 | 总超时 |
-| 4 | 已发送，或上次发送结果不确定 |
-| 5 | 同一 task 已有 runner 持锁 |
-| 130 | 用户中断 |
+主要参数包括 `--mode {queue-only,strict}`、`--codex-home`、
+`--app-server-endpoint`、`--command-timeout` 和 `--force`。`--silent` 接受 0 到 3：
+0 输出全部，1 隐藏 queue-only note，2 另隐藏 poll 输出，3 只保留最终结果。退出码 0
+表示成功，2 表示配置/session/明确拒绝错误，3 表示总超时，4 表示已投递或结果不确定，
+5 表示 task 被锁定，130 表示中断。
 
-## 状态与重复投递
-
-runner 在 task 目录创建 `.wake-codex.lock` 和 `.wake-codex-state.json`。状态文件
-使用原子替换写入，只记录线程、尝试次数、时间和消息 SHA256，不保存消息正文。
-
-调用 queue 前先写入 `sending`，成功后再写入 `delivered`。如果进程在 queue
-执行期间崩溃或 queue 超时，下一次启动会拒绝自动重发，因为无法判断消息是否已经
-入队。确认目标线程后，可显式使用 `--force` 恢复。
-
-queue 的临时非零错误会写成 `retrying`；重启 runner 会直接继续发送阶段，不再执行
-trigger。每次重试仍会重新读取消息文件；strict 模式还会重新检查 loaded 状态。
-无论使用哪种模式，queue 明确返回 archived、not loaded 或 not found 时都会写成终态
-`rejected` 并以退出码 2 结束，不会进入无限重试。修复目标会话后需要显式 `--force`
-才能再次投递。
-
-strict 的 loaded 检查与 queue 都指向同一个 endpoint，但 Codex CLI 当前没有提供把
-`thread/loaded/list` 与 queue 合并为原子操作的接口。第二次检查完成后、queue 到达前
-仍有极短的关闭竞态；若此时 session 关闭，queue 自身的 not-loaded/not-found 拒绝会
-被当作不可重试配置错误。queue 超时依旧属于投递结果不确定，状态保留为 `sending`。
+`tasks/` 用于真实任务并被 Git 完整忽略。`tasks.example/` 是脱敏模板，包含立即触发和
+Slurm job 终态检查示例。
 
 ## 测试
 
-测试全部使用 fake trigger、fake Slurm 和 fake Codex，不会向真实线程发送消息：
+测试只使用 fake trigger、fake Slurm 和 fake Codex，不会向真实线程发送消息：
 
 ```bash
 pytest

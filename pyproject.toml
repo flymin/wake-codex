@@ -7,7 +7,7 @@ name = "wake-codex"
 version = "0.1.0"
 description = "Poll an external trigger and queue a message to a Codex thread"
 requires-python = ">=3.10"
-dependencies = ["PyYAML>=6"]
+dependencies = ["PyYAML>=6", "croniter>=2"]
 
 [project.scripts]
 wake-codex = "wake_codex.cli:main"

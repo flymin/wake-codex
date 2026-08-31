@@ -3,3 +3,6 @@ name: slurm-jobs-example
 thread_id: 00000000-0000-0000-0000-000000000000
 trigger: trigger.sh
 message: message.txt
+schedule: "*/5 * * * *"
+lifecycle: once
+mode: queue-only

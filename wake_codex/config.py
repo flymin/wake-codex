@@ -4,12 +4,24 @@ import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
+from croniter import CroniterBadCronError, croniter
 
 
 CONFIG_FILENAME = "task.yaml"
-SUPPORTED_FIELDS = {"version", "name", "thread_id", "trigger", "message"}
+SUPPORTED_FIELDS = {
+    "version",
+    "name",
+    "thread_id",
+    "trigger",
+    "message",
+    "schedule",
+    "timezone",
+    "lifecycle",
+    "mode",
+}
 
 
 class ConfigError(ValueError):
@@ -24,6 +36,10 @@ class TaskConfig:
     thread_id: str
     trigger_path: Path
     message_path: Path
+    schedule: str | None = None
+    timezone: str | None = None
+    lifecycle: str = "once"
+    mode: str = "queue-only"
 
 
 def _required_text(data: dict[str, object], key: str) -> str:
@@ -58,6 +74,15 @@ def _task_file(task_dir: Path, value: str, field: str) -> Path:
     return candidate
 
 
+def _optional_text(data: dict[str, object], key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{key} must be a non-empty string when provided")
+    return value.strip()
+
+
 def load_task_config(task_folder: str | os.PathLike[str]) -> TaskConfig:
     task_dir = Path(task_folder).expanduser().resolve()
     if not task_dir.is_dir():
@@ -89,6 +114,29 @@ def load_task_config(task_folder: str | os.PathLike[str]) -> TaskConfig:
     if not os.access(trigger_path, os.X_OK):
         raise ConfigError(f"trigger is not executable: {trigger_path}")
 
+    schedule = _optional_text(data, "schedule")
+    if schedule is not None:
+        try:
+            croniter(schedule)
+        except (CroniterBadCronError, ValueError, KeyError) as exc:
+            raise ConfigError(f"schedule must be a valid five-field cron expression: {schedule}") from exc
+        if len(schedule.split()) != 5:
+            raise ConfigError("schedule must contain exactly five cron fields")
+
+    timezone_name = _optional_text(data, "timezone")
+    if timezone_name is not None:
+        try:
+            ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ConfigError(f"unknown IANA timezone: {timezone_name}") from exc
+
+    lifecycle = _optional_text(data, "lifecycle") or "once"
+    if lifecycle not in {"once", "continuous"}:
+        raise ConfigError("lifecycle must be once or continuous")
+    mode = _optional_text(data, "mode") or "queue-only"
+    if mode not in {"queue-only", "strict"}:
+        raise ConfigError("mode must be queue-only or strict")
+
     return TaskConfig(
         task_dir=task_dir,
         config_path=config_path,
@@ -96,4 +144,8 @@ def load_task_config(task_folder: str | os.PathLike[str]) -> TaskConfig:
         thread_id=thread_id,
         trigger_path=trigger_path,
         message_path=message_path,
+        schedule=schedule,
+        timezone=timezone_name,
+        lifecycle=lifecycle,
+        mode=mode,
     )

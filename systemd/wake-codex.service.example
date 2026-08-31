@@ -1,0 +1,13 @@
+[Unit]
+Description=wake-codex task scheduler
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=@WAKE_CODEX@ daemon --codex @CODEX@
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

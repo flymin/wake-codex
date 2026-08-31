@@ -82,3 +82,42 @@ def test_rejects_noncanonical_session_id(tmp_path: Path, thread_id: str) -> None
 
     with pytest.raises(ConfigError, match="thread_id must"):
         load_task_config(task_dir)
+
+
+def test_loads_daemon_schedule_fields(tmp_path: Path) -> None:
+    task_dir = tmp_path / "task"
+    _write_task(task_dir)
+    with (task_dir / "task.yaml").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "schedule: '*/5 * * * *'\n"
+            "timezone: Asia/Shanghai\n"
+            "lifecycle: continuous\n"
+            "mode: strict\n"
+        )
+
+    config = load_task_config(task_dir)
+
+    assert config.schedule == "*/5 * * * *"
+    assert config.timezone == "Asia/Shanghai"
+    assert config.lifecycle == "continuous"
+    assert config.mode == "strict"
+
+
+@pytest.mark.parametrize(
+    ("line", "match"),
+    [
+        ("schedule: '* * * *'", "five-field"),
+        ("schedule: '* * * * * *'", "five"),
+        ("timezone: Nowhere/Invalid", "timezone"),
+        ("lifecycle: forever", "lifecycle"),
+        ("mode: guessed", "mode"),
+    ],
+)
+def test_rejects_invalid_daemon_fields(tmp_path: Path, line: str, match: str) -> None:
+    task_dir = tmp_path / "task"
+    _write_task(task_dir)
+    with (task_dir / "task.yaml").open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+    with pytest.raises(ConfigError, match=match):
+        load_task_config(task_dir)
