@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
@@ -36,8 +37,8 @@ Daemon commands:
 
 TOP_LEVEL_EPILOG = """
 Examples:
-  wake-codex --codex /path/to/codex tasks/my-task
-  wake-codex daemon --codex /path/to/codex
+  wake-codex tasks/my-task
+  wake-codex daemon
   wake-codex submit tasks/my-scheduled-task
   wake-codex list --all
   wake-codex show TASK_ID --full
@@ -59,9 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     general.add_argument("-h", "--help", action="help", help="show this help message and exit")
     one_shot = parser.add_argument_group("one-shot mode")
     one_shot.add_argument("task_folder", metavar="TASK_FOLDER", help="task directory containing task.yaml")
-    one_shot.add_argument(
-        "--codex", required=True, metavar="PATH", help="path to the Codex executable or wrapper"
-    )
+    _codex_argument(one_shot)
     one_shot.add_argument(
         "--codex-home",
         metavar="PATH",
@@ -122,6 +121,15 @@ def _state_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _codex_argument(parser: argparse._ActionsContainer) -> None:
+    parser.add_argument(
+        "--codex",
+        default=shutil.which("codex"),
+        metavar="PATH",
+        help="Codex executable or wrapper (default: codex resolved from PATH)",
+    )
+
+
 def build_command_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="wake-codex",
@@ -137,9 +145,7 @@ def build_command_parser() -> argparse.ArgumentParser:
             "manager when background lifecycle management is required."
         ),
     )
-    daemon.add_argument(
-        "--codex", required=True, metavar="PATH", help="path to the Codex executable or wrapper"
-    )
+    _codex_argument(daemon)
     daemon.add_argument(
         "--codex-home",
         metavar="PATH",
@@ -362,6 +368,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments and arguments[0] in DAEMON_COMMANDS:
         parser = build_command_parser()
         args = parser.parse_args(arguments)
+        if args.command == "daemon" and args.codex is None:
+            parser.error("--codex was omitted and no codex executable was found in PATH")
         try:
             return _daemon_request(args)
         except (ConfigError, RunnerSetupError, DaemonError, IpcError) as exc:
@@ -372,6 +380,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 130
     parser = build_parser()
     args = parser.parse_args(arguments)
+    if args.codex is None:
+        parser.error("--codex was omitted and no codex executable was found in PATH")
     if args.poll_interval <= 0:
         parser.error("--poll-interval must be greater than 0")
     if args.timeout != -1 and args.timeout <= 0:

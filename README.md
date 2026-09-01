@@ -50,8 +50,11 @@ task 通过目录引用注册。提交时冻结 YAML 中的名称、线程、sch
 daemon 始终在前台运行，本项目不提供 `start/status/stop` 包装。可先手动运行：
 
 ```bash
-wake-codex daemon --codex "$(command -v codex)"
+wake-codex daemon
 ```
+
+one-shot 和 daemon 的 `--codex` 都默认使用当前 `PATH` 中的 `codex`；需要固定其他入口
+时再显式传入 `--codex /path/to/codex`。
 
 另一个 terminal 中可以随时管理 task：
 
@@ -138,10 +141,12 @@ purge 默认 dry run，必须加 `--confirm` 才删除。output purge 保留事�
 不带子命令的旧用法保持兼容，`schedule` 字段不是必需的：
 
 ```bash
-wake-codex --codex "$(command -v codex)" --poll-interval 60 --timeout -1 tasks/my-task
+wake-codex --poll-interval 60 --timeout -1 tasks/my-task
 ```
 
-主要参数包括 `--mode {queue-only,strict}`、`--codex-home`、
+`--codex` 默认使用当前 `PATH` 中解析到的 `codex`（等价于 `command -v codex`）；
+未找到时会在执行前报错，也可以显式传入其他入口。主要参数还包括
+`--mode {queue-only,strict}`、`--codex-home`、
 `--app-server-endpoint`、`--command-timeout` 和 `--force`。`--silent` 接受 0 到 3：
 0 输出全部，1 隐藏 queue-only note，2 另隐藏 poll 输出，3 只保留最终结果。退出码 0
 表示成功，2 表示配置/session/明确拒绝错误，3 表示总超时，4 表示已投递或结果不确定，
