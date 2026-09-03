@@ -174,7 +174,12 @@ class WakeDaemon:
                 if result is None:
                     return
             result, event = await self._command_event(
-                task_id, "trigger", [task["trigger_path"]], Path(task["task_dir"]), phase="checking"
+                task_id,
+                "trigger",
+                [task["trigger_path"]],
+                Path(task["task_dir"]),
+                phase="checking",
+                event_statuses={0: "ok", 1: "block"},
             )
             if self._cancelled(task_id):
                 self._terminal(task_id, "cancelled", "cancelled during trigger check")
@@ -325,6 +330,7 @@ class WakeDaemon:
         phase: str,
         stdin: str | None = None,
         env: dict[str, str] | None = None,
+        event_statuses: dict[int, str] | None = None,
     ) -> tuple[CommandResult, dict[str, Any]]:
         event_id = self.store.start_event(task_id, kind)
         stdout_tmp, stderr_tmp = self.store.event_temp_paths(task_id, event_id)
@@ -377,9 +383,15 @@ class WakeDaemon:
         stdout = stdout_tmp.read_text(encoding="utf-8", errors="replace")
         stderr = stderr_tmp.read_text(encoding="utf-8", errors="replace")
         result = CommandResult(None if timed_out else process.returncode, stdout, stderr, timed_out)
+        if timed_out:
+            event_status = "timeout"
+        elif event_statuses is not None and result.returncode in event_statuses:
+            event_status = event_statuses[result.returncode]
+        else:
+            event_status = "ok" if result.returncode == 0 else "error"
         event = self.store.finish_event(
             event_id,
-            status="timeout" if timed_out else ("ok" if process.returncode == 0 else "error"),
+            status=event_status,
             returncode=result.returncode,
             duration_ms=int((time.monotonic() - started) * 1000),
             stdout_tmp=stdout_tmp,

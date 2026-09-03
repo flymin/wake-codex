@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wake Codex Session"
+  short_description: "Resume a Codex session when a condition is met"
+  default_prompt: "Use $wake-codex-session with session ID SESSION_ID to resume it after the background condition is satisfied."

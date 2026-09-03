@@ -121,6 +121,7 @@ def test_once_task_delivers_and_retains_output(tmp_path: Path) -> None:
         assert stored["status"] == "delivered"
         assert stored["delivery_count"] == 1
         assert [event["kind"] for event in events] == ["queue", "trigger"]
+        assert [event["status"] for event in events] == ["ok", "ok"]
         assert daemon.store.read_artifact(events[0]["stdout_path"]).strip() == "queued"
         assert (tmp_path / "queue-calls").read_text() == "1"
     finally:
@@ -145,6 +146,48 @@ def test_continuous_task_requires_block_to_rearm(tmp_path: Path) -> None:
         assert stored["delivery_count"] == 2
         assert stored["armed"] == 0
         assert (tmp_path / "queue-calls").read_text() == "2"
+        trigger_statuses = [
+            event["status"] for event in daemon.store.list_events(task["id"], 20)
+            if event["kind"] == "trigger"
+        ]
+        assert "block" in trigger_statuses
+        assert "error" not in trigger_statuses
+    finally:
+        _close(daemon)
+
+
+@pytest.mark.parametrize(
+    ("trigger", "command_timeout", "event_status", "returncode", "task_status", "last_result"),
+    [
+        ("echo go; exit 0", 1.0, "ok", 0, "delivered", "go"),
+        ("echo 'job queued'; exit 1", 1.0, "block", 1, "scheduled", "block"),
+        ("echo failed >&2; exit 7", 1.0, "error", 7, "scheduled", "trigger-error"),
+        ("sleep 30", 0.05, "timeout", None, "scheduled", "trigger-timeout"),
+    ],
+)
+def test_trigger_event_status_follows_trigger_protocol(
+    tmp_path: Path,
+    trigger: str,
+    command_timeout: float,
+    event_status: str,
+    returncode: int | None,
+    task_status: str,
+    last_result: str,
+) -> None:
+    daemon = _daemon(tmp_path, timeout=command_timeout)
+    task = daemon._submit(str(_task(tmp_path, trigger)), False)
+    try:
+        asyncio.run(_execute(daemon, task["id"]))
+        stored = daemon.store.get_task(task["id"])
+        event = next(
+            item for item in daemon.store.list_events(task["id"], 20)
+            if item["kind"] == "trigger"
+        )
+        assert event["status"] == event_status
+        assert event["returncode"] == returncode
+        assert stored["status"] == task_status
+        assert stored["last_result"] == last_result
+        assert (stored["next_run_at"] is not None) is (task_status == "scheduled")
     finally:
         _close(daemon)
 
@@ -156,6 +199,8 @@ def test_strict_checks_before_trigger_and_queue(tmp_path: Path) -> None:
         asyncio.run(_execute(daemon, task["id"]))
         assert (tmp_path / "loaded-checks").read_text() == "2"
         assert daemon.store.get_task(task["id"])["status"] == "delivered"
+        events = daemon.store.list_events(task["id"], 20)
+        assert all(event["status"] == "ok" for event in events)
     finally:
         _close(daemon)
 
@@ -166,6 +211,9 @@ def test_queue_permanent_rejection_is_terminal(tmp_path: Path) -> None:
     try:
         asyncio.run(_execute(daemon, task["id"]))
         assert daemon.store.get_task(task["id"])["status"] == "rejected"
+        queue_event = daemon.store.list_events(task["id"], 20)[0]
+        assert queue_event["kind"] == "queue"
+        assert queue_event["status"] == "error"
     finally:
         _close(daemon)
 
@@ -176,6 +224,9 @@ def test_queue_timeout_is_ambiguous(tmp_path: Path) -> None:
     try:
         asyncio.run(_execute(daemon, task["id"]))
         assert daemon.store.get_task(task["id"])["status"] == "ambiguous"
+        queue_event = daemon.store.list_events(task["id"], 20)[0]
+        assert queue_event["kind"] == "queue"
+        assert queue_event["status"] == "timeout"
     finally:
         _close(daemon)
 

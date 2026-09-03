@@ -114,7 +114,8 @@ daemon 在 task 目录持续持有 `.wake-codex.lock`，因此 active daemon tas
 one-shot runner 执行。queue 前后仍写兼容的 `.wake-codex-state.json`；其中只有状态、
 次数和消息 SHA256，不含消息正文。
 
-- trigger block、超时或错误：记录事件，等待下一个 cron。
+- trigger 返回 `0` 时 event status 为 `ok` 并进入投递；返回 `1` 时 status 为 `block`，
+  task 正常保持 `scheduled` 并等待下一个 cron；其他返回码为 `error`，超时为 `timeout`。
 - 临时 queue 错误或消息暂不可读：进入内部 retry，不重新执行 trigger。
 - archived、not loaded、not found：终态 `rejected`，不重试。
 - queue 超时、发送中 daemon 崩溃、发送中取消：终态 `ambiguous`，不自动重试。
@@ -123,6 +124,7 @@ one-shot runner 执行。queue 前后仍写兼容的 `.wake-codex-state.json`；
 
 每次 trigger、strict check 和 queue 的完整 stdout/stderr 都永久保存在 gzip artifact；
 数据库记录路径、大小和 SHA256。`show/events` 默认只显示摘要，`--full` 读取完整输出。
+上述 trigger status 语义只影响修复后新产生的 event，不迁移已有历史记录。
 没有自动 retention，可显式清理：
 
 ```bash
