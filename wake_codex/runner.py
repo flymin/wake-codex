@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import signal
 import subprocess
 import sys
@@ -13,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from wake_codex.config import TaskConfig
 
@@ -29,6 +30,24 @@ LOCK_FILENAME = ".wake-codex.lock"
 SESSION_INDEX_FILENAME = "session_index.jsonl"
 KNOWN_STATES = {"sending", "delivered", "retrying", "rejected"}
 MODES = {"queue-only", "strict"}
+STATE_DB_SOURCE_KINDS = [
+    "cli",
+    "vscode",
+    "exec",
+    "appServer",
+    "subAgent",
+    "subAgentReview",
+    "subAgentCompact",
+    "subAgentThreadSpawn",
+    "subAgentOther",
+    "unknown",
+]
+_MISSING_THREAD_ERROR = re.compile(
+    r"(?:thread|session).{0,160}(?:not[ _-]found|not[ _-]loaded|does not exist)"
+    r"|(?:not[ _-]found|not[ _-]loaded|does not exist).{0,160}(?:thread|session)"
+    r"|no rollout found for thread id",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class RunnerSetupError(ValueError):
@@ -238,13 +257,13 @@ def _transcript_exists(directory: Path, thread_id: str, *, recursive: bool) -> b
         raise RunnerSetupError(f"cannot inspect Codex session transcripts in {directory}: {exc}") from exc
 
 
-def _validate_session_exists(codex_home: Path, thread_id: str) -> None:
+def _legacy_session_state(codex_home: Path, thread_id: str) -> tuple[str, int]:
     archived_dir = codex_home / "archived_sessions"
     if _transcript_exists(archived_dir, thread_id, recursive=True):
-        raise RunnerSetupError(f"Codex session is archived and cannot receive queue messages: {thread_id}")
+        return "archived", 0
 
     if _transcript_exists(codex_home / "sessions", thread_id, recursive=True):
-        return
+        return "active", 0
 
     index_path = codex_home / SESSION_INDEX_FILENAME
     malformed_lines = 0
@@ -260,9 +279,240 @@ def _validate_session_exists(codex_home: Path, thread_id: str) -> None:
                         malformed_lines += 1
                         continue
                     if isinstance(item, dict) and item.get("id") == thread_id:
-                        return
+                        return "active", malformed_lines
         except (OSError, UnicodeError) as exc:
             raise RunnerSetupError(f"cannot read Codex session index {index_path}: {exc}") from exc
+
+    return "missing", malformed_lines
+
+
+class _AppServerClient:
+    def __init__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout: float,
+    ) -> None:
+        try:
+            self.process = subprocess.Popen(
+                list(argv),
+                cwd=cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                env=env,
+            )
+        except OSError as exc:
+            raise RunnerSetupError(f"cannot start Codex app-server session lookup: {exc}") from exc
+        assert self.process.stdin is not None
+        assert self.process.stdout is not None
+        assert self.process.stderr is not None
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.process.stdout, selectors.EVENT_READ, "stdout")
+        self.selector.register(self.process.stderr, selectors.EVENT_READ, "stderr")
+        self.stdout_buffer = bytearray()
+        self.stderr = bytearray()
+        self.next_id = 1
+        self.deadline = time.monotonic() + timeout
+
+    def close(self) -> None:
+        try:
+            if self.process.stdin is not None and not self.process.stdin.closed:
+                self.process.stdin.close()
+            try:
+                self.process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                _terminate_process_group(self.process)
+        finally:
+            self.selector.close()
+            for stream in (self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    stream.close()
+
+    def __enter__(self) -> "_AppServerClient":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def notify(self, method: str, params: dict[str, object]) -> None:
+        self._write({"method": method, "params": params})
+
+    def request(self, method: str, params: dict[str, object]) -> dict[str, Any]:
+        request_id = self.next_id
+        self.next_id += 1
+        self._write({"method": method, "id": request_id, "params": params})
+        while True:
+            response = self._next_response()
+            if response.get("id") == request_id:
+                return response
+
+    def error_details(self) -> str:
+        text = self.stderr.decode("utf-8", errors="replace").strip()
+        return f": {text}" if text else ""
+
+    def _write(self, payload: dict[str, object]) -> None:
+        assert self.process.stdin is not None
+        try:
+            self.process.stdin.write(json.dumps(payload, separators=(",", ":")).encode() + b"\n")
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise RunnerSetupError(
+                f"Codex app-server closed during session lookup{self.error_details()}"
+            ) from exc
+
+    def _next_response(self) -> dict[str, Any]:
+        while True:
+            line = self._pop_stdout_line()
+            if line is not None:
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise RunnerSetupError(
+                        f"invalid app-server response during session lookup: {exc}"
+                    ) from exc
+                if isinstance(value, dict):
+                    return value
+
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise RunnerSetupError("Codex app-server session lookup timed out")
+            events = self.selector.select(remaining)
+            if not events:
+                raise RunnerSetupError("Codex app-server session lookup timed out")
+            for key, _mask in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                except OSError as exc:
+                    raise RunnerSetupError(f"cannot read Codex app-server response: {exc}") from exc
+                if not chunk:
+                    self.selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stdout":
+                    self.stdout_buffer.extend(chunk)
+                elif len(self.stderr) < 65536:
+                    self.stderr.extend(chunk[: 65536 - len(self.stderr)])
+            if not self.selector.get_map():
+                raise RunnerSetupError(
+                    f"Codex app-server returned no session lookup response{self.error_details()}"
+                )
+
+    def _pop_stdout_line(self) -> bytes | None:
+        newline = self.stdout_buffer.find(b"\n")
+        if newline < 0:
+            return None
+        line = bytes(self.stdout_buffer[:newline])
+        del self.stdout_buffer[: newline + 1]
+        return line
+
+
+def _rpc_result(response: dict[str, Any], method: str) -> dict[str, Any]:
+    error = response.get("error")
+    if error is not None:
+        raise RunnerSetupError(f"Codex app-server {method} rejected session lookup: {error!r}")
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise RunnerSetupError(f"invalid Codex app-server {method} response")
+    return result
+
+
+def _is_missing_thread_error(response: dict[str, Any]) -> bool:
+    error = response.get("error")
+    return error is not None and _MISSING_THREAD_ERROR.search(str(error)) is not None
+
+
+def _state_db_has_archived_thread(client: _AppServerClient, thread_id: str) -> bool:
+    cursor: str | None = None
+    while True:
+        result = _rpc_result(
+            client.request(
+                "thread/list",
+                {
+                    "archived": True,
+                    "cursor": cursor,
+                    "limit": 1000,
+                    "sourceKinds": STATE_DB_SOURCE_KINDS,
+                    "useStateDbOnly": True,
+                },
+            ),
+            "thread/list",
+        )
+        data = result.get("data")
+        if not isinstance(data, list):
+            raise RunnerSetupError("invalid Codex app-server thread/list data")
+        for item in data:
+            if isinstance(item, dict) and item.get("id") == thread_id:
+                return True
+        next_cursor = result.get("nextCursor")
+        if next_cursor is None:
+            return False
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+            raise RunnerSetupError("invalid Codex app-server thread/list pagination cursor")
+        cursor = next_cursor
+
+
+def _validate_session_exists(
+    codex: Path,
+    codex_home: Path,
+    endpoint: str,
+    mode: str,
+    thread_id: str,
+    cwd: Path,
+    timeout: float,
+) -> None:
+    legacy_state, malformed_lines = _legacy_session_state(codex_home, thread_id)
+    if legacy_state == "archived":
+        raise RunnerSetupError(f"Codex session is archived and cannot receive queue messages: {thread_id}")
+
+    command = (
+        _proxy_command(codex, endpoint)
+        if mode == "strict"
+        else [str(codex), "app-server", "--stdio"]
+    )
+    with _AppServerClient(
+        command,
+        cwd=cwd,
+        env=_codex_env(codex_home),
+        timeout=timeout,
+    ) as client:
+        _rpc_result(
+            client.request(
+                "initialize",
+                {
+                    "clientInfo": {
+                        "name": "wake-codex",
+                        "title": "wake-codex",
+                        "version": "0.1.0",
+                    }
+                },
+            ),
+            "initialize",
+        )
+        client.notify("initialized", {})
+        read_response = client.request(
+            "thread/read", {"threadId": thread_id, "includeTurns": False}
+        )
+        state_db_exists = False
+        if "error" in read_response:
+            if not _is_missing_thread_error(read_response):
+                _rpc_result(read_response, "thread/read")
+        else:
+            result = _rpc_result(read_response, "thread/read")
+            thread = result.get("thread")
+            if not isinstance(thread, dict) or thread.get("id") != thread_id:
+                raise RunnerSetupError("invalid Codex app-server thread/read data")
+            state_db_exists = True
+
+        if state_db_exists and _state_db_has_archived_thread(client, thread_id):
+            raise RunnerSetupError(
+                f"Codex session is archived and cannot receive queue messages: {thread_id}"
+            )
+
+    if state_db_exists or legacy_state == "active":
+        return
 
     if malformed_lines:
         raise RunnerSetupError(
@@ -379,7 +629,8 @@ def _require_session_loaded(
 
 _PERMANENT_QUEUE_ERROR = re.compile(
     r"(?:thread|session).{0,160}(?:archived|not(?: currently)?[ _-]loaded|not[ _-]found|does not exist)"
-    r"|(?:archived|not(?: currently)?[ _-]loaded|not[ _-]found|does not exist).{0,160}(?:thread|session)",
+    r"|(?:archived|not(?: currently)?[ _-]loaded|not[ _-]found|does not exist).{0,160}(?:thread|session)"
+    r"|no rollout found for thread id",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -551,12 +802,6 @@ def run_task(
         raise RunnerSetupError("silent level must be an integer from 0 to 3")
     codex = _resolve_codex(codex_entry)
     resolved_codex_home = _resolve_codex_home(codex_home)
-    _validate_session_exists(resolved_codex_home, config.thread_id)
-    log(
-        f"validated Codex session {config.thread_id} in {resolved_codex_home}",
-        silent=silent,
-        hide_at=3,
-    )
     _preflight_codex(
         codex,
         resolved_codex_home,
@@ -564,6 +809,20 @@ def run_task(
         app_server_endpoint,
         config.task_dir,
         command_timeout,
+    )
+    _validate_session_exists(
+        codex,
+        resolved_codex_home,
+        app_server_endpoint,
+        mode,
+        config.thread_id,
+        config.task_dir,
+        command_timeout,
+    )
+    log(
+        f"validated Codex session {config.thread_id} in state DB/legacy storage",
+        silent=silent,
+        hide_at=3,
     )
     state_path = config.task_dir / STATE_FILENAME
     lock = TaskLock(config.task_dir / LOCK_FILENAME)

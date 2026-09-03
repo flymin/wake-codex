@@ -4,6 +4,10 @@
 向目标线程提交消息。它支持两种运行方式：原有的前台 one-shot runner，以及可同时管理
 多个 cron task 的 foreground daemon。
 
+当前实现面向并测试于 **Codex CLI `0.151.0-alpha.7.2`**，不承诺兼容更早版本。
+session 预检同时支持该版本的 state DB/paginated thread metadata，以及仍在使用的
+`sessions/`、`archived_sessions/` 和 `session_index.jsonl` legacy 存储。
+
 ## 安装
 
 在准备运行该工具的 Python 环境中安装项目及依赖，并将项目入口加入 `PATH`：
@@ -105,8 +109,11 @@ systemctl --user status wake-codex.service
 失败都会 fail closed。检查和 queue 指向同一 endpoint，但 Codex 当前没有把两者合成
 原子操作的接口，二次检查后仍存在很短的关闭竞态；queue 自身的明确拒绝会覆盖该竞态。
 
-submit 始终先检查 session：`archived_sessions/` 中的 archived session 和不存在的
-session 都直接拒绝。它们不会执行 trigger，也不会成为离线投递目标。
+submit 始终先检查 session：通过 app-server `thread/read` 查询 state DB/paginated
+metadata，并分页查询 `thread/list` 的 archived state；同时检查 `sessions/`、
+`archived_sessions/` 和 `session_index.jsonl`。任一来源确认 archived 都直接拒绝；
+state DB 和 legacy 来源均无法确认存在时判定 missing。两者都会在执行 trigger 前退出，
+不会成为离线投递目标。
 
 ## 状态与故障语义
 
@@ -117,7 +124,8 @@ one-shot runner 执行。queue 前后仍写兼容的 `.wake-codex-state.json`；
 - trigger 返回 `0` 时 event status 为 `ok` 并进入投递；返回 `1` 时 status 为 `block`，
   task 正常保持 `scheduled` 并等待下一个 cron；其他返回码为 `error`，超时为 `timeout`。
 - 临时 queue 错误或消息暂不可读：进入内部 retry，不重新执行 trigger。
-- archived、not loaded、not found：终态 `rejected`，不重试。
+- archived、not loaded、not found，以及新版 `no rollout found for thread id`：终态
+  `rejected`，不重试。
 - queue 超时、发送中 daemon 崩溃、发送中取消：终态 `ambiguous`，不自动重试。
 - scheduled/checking 取消：`cancelled`；发送中的取消：`ambiguous`。
 - 重启恢复时 checking 重新调度，retrying 立即到期，sending/cancelling 变为 ambiguous。

@@ -528,7 +528,15 @@ class WakeDaemon:
         config = load_task_config(task_folder)
         if config.schedule is None:
             raise ConfigError("schedule is required for daemon submission")
-        _validate_session_exists(self.codex_home, config.thread_id)
+        _validate_session_exists(
+            self.codex,
+            self.codex_home,
+            self.endpoint,
+            config.mode,
+            config.thread_id,
+            config.task_dir,
+            self.command_timeout,
+        )
         if config.mode == "strict":
             _proxy_command(self.codex, self.endpoint)
         state_path = config.task_dir / STATE_FILENAME

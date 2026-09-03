@@ -34,20 +34,40 @@ def _fake_codex(tmp_path: Path, behavior: str = "success") -> Path:
     return _executable(
         tmp_path / "codex",
         "#!/usr/bin/env python3\n"
-        "import json, sys, time\n"
+        "import json, os, sys, time\n"
         "from pathlib import Path\n"
         f"behavior = Path({str(behavior_path)!r}).read_text().strip()\n"
         "if sys.argv[1:] == ['queue', '--help']:\n    raise SystemExit(0)\n"
-        "if sys.argv[1:3] == ['app-server', 'proxy']:\n"
-        f"    p = Path({str(checks)!r})\n"
-        "    p.write_text(str((int(p.read_text()) if p.exists() else 0) + 1))\n"
-        "    sys.stdin.read()\n"
-        "    print(json.dumps({'id': 2, 'result': {'data': " + repr([THREAD_ID]) + "}}))\n"
+        "if len(sys.argv) >= 3 and sys.argv[1] == 'app-server' and sys.argv[2] in {'--stdio', 'proxy'}:\n"
+        "    home = Path(os.environ['CODEX_HOME'])\n"
+        f"    archived = any(home.joinpath('archived_sessions').rglob('*-{THREAD_ID}.jsonl'))\n"
+        f"    active = (home / 'session_index.jsonl').exists() and {THREAD_ID!r} in (home / 'session_index.jsonl').read_text()\n"
+        "    for line in sys.stdin:\n"
+        "        request = json.loads(line)\n"
+        "        method = request.get('method')\n"
+        "        request_id = request.get('id')\n"
+        "        if method == 'initialize':\n"
+        "            response = {'id': request_id, 'result': {}}\n"
+        "        elif method == 'thread/read':\n"
+        "            if active or archived:\n"
+        f"                response = {{'id': request_id, 'result': {{'thread': {{'id': {THREAD_ID!r}}}}}}}\n"
+        "            else:\n"
+        "                response = {'id': request_id, 'error': {'code': -32600, 'message': 'thread not loaded'}}\n"
+        "        elif method == 'thread/list':\n"
+        f"            data = [{{'id': {THREAD_ID!r}}}] if request.get('params', {{}}).get('archived') and archived else []\n"
+        "            response = {'id': request_id, 'result': {'data': data, 'nextCursor': None}}\n"
+        "        elif method == 'thread/loaded/list':\n"
+        f"            p = Path({str(checks)!r})\n"
+        "            p.write_text(str((int(p.read_text()) if p.exists() else 0) + 1))\n"
+        f"            response = {{'id': request_id, 'result': {{'data': [{THREAD_ID!r}]}}}}\n"
+        "        else:\n"
+        "            continue\n"
+        "        print(json.dumps(response), flush=True)\n"
         "    raise SystemExit(0)\n"
         f"p = Path({str(calls)!r})\n"
         "p.write_text(str((int(p.read_text()) if p.exists() else 0) + 1))\n"
         "if behavior == 'timeout': time.sleep(30)\n"
-        "if behavior == 'missing':\n    print('thread not found', file=sys.stderr)\n    raise SystemExit(2)\n"
+        "if behavior == 'missing':\n    print('failed to read thread: no rollout found for thread id', file=sys.stderr)\n    raise SystemExit(2)\n"
         "print('queued')\n",
     )
 
@@ -174,8 +194,9 @@ def test_trigger_event_status_follows_trigger_protocol(
     task_status: str,
     last_result: str,
 ) -> None:
-    daemon = _daemon(tmp_path, timeout=command_timeout)
+    daemon = _daemon(tmp_path)
     task = daemon._submit(str(_task(tmp_path, trigger)), False)
+    daemon.command_timeout = command_timeout
     try:
         asyncio.run(_execute(daemon, task["id"]))
         stored = daemon.store.get_task(task["id"])
@@ -219,8 +240,9 @@ def test_queue_permanent_rejection_is_terminal(tmp_path: Path) -> None:
 
 
 def test_queue_timeout_is_ambiguous(tmp_path: Path) -> None:
-    daemon = _daemon(tmp_path, "timeout", timeout=0.05)
+    daemon = _daemon(tmp_path, "timeout")
     task = daemon._submit(str(_task(tmp_path)), False)
+    daemon.command_timeout = 0.05
     try:
         asyncio.run(_execute(daemon, task["id"]))
         assert daemon.store.get_task(task["id"])["status"] == "ambiguous"

@@ -51,19 +51,54 @@ def _codex(path: Path, body: str, *, loaded_checks: list[bool] | None = None) ->
         path,
         "#!/usr/bin/env python3\n"
         "import json\n"
+        "import os\n"
         "import sys\n"
+        "from pathlib import Path\n"
         "if sys.argv[1:] == ['queue', '--help']:\n"
         "    raise SystemExit(0)\n"
-        "if sys.argv[1:3] == ['app-server', 'proxy']:\n"
-        "    from pathlib import Path\n"
-        f"    count_path = Path({str(check_count)!r})\n"
-        "    count = int(count_path.read_text()) if count_path.exists() else 0\n"
-        "    count_path.write_text(str(count + 1))\n"
-        f"    checks = {checks!r}\n"
-        "    loaded = checks[min(count, len(checks) - 1)]\n"
-        "    sys.stdin.read()\n"
-        "    print(json.dumps({'id': 1, 'result': {}}))\n"
-        f"    print(json.dumps({{'id': 2, 'result': {{'data': [{THREAD_ID!r}] if loaded else []}}}}))\n"
+        "if len(sys.argv) >= 3 and sys.argv[1] == 'app-server' and sys.argv[2] in {'--stdio', 'proxy'}:\n"
+        "    home = Path(os.environ['CODEX_HOME'])\n"
+        "    marker = home / 'fake-state-db-status'\n"
+        "    if marker.exists():\n"
+        "        session_state = marker.read_text().strip()\n"
+        f"    elif any(home.joinpath('archived_sessions').rglob('*-{THREAD_ID}.jsonl')):\n"
+        "        session_state = 'archived'\n"
+        f"    elif any(home.joinpath('sessions').rglob('*-{THREAD_ID}.jsonl')):\n"
+        "        session_state = 'active'\n"
+        f"    elif (home / 'session_index.jsonl').exists() and {THREAD_ID!r} in (home / 'session_index.jsonl').read_text():\n"
+        "        session_state = 'active'\n"
+        "    else:\n"
+        "        session_state = 'missing'\n"
+        "    for line in sys.stdin:\n"
+        "        request = json.loads(line)\n"
+        "        method = request.get('method')\n"
+        "        request_id = request.get('id')\n"
+        "        if method == 'initialize':\n"
+        "            response = {'id': request_id, 'result': {}}\n"
+        "        elif method == 'thread/read':\n"
+        "            if session_state == 'missing':\n"
+        "                response = {'id': request_id, 'error': {'code': -32600, 'message': 'thread not loaded'}}\n"
+        "            else:\n"
+        f"                response = {{'id': request_id, 'result': {{'thread': {{'id': {THREAD_ID!r}}}}}}}\n"
+        "        elif method == 'thread/list':\n"
+        "            params = request.get('params', {})\n"
+        "            if params.get('archived') and session_state == 'archived-page-2':\n"
+        f"                data = [{{'id': {THREAD_ID!r}}}] if params.get('cursor') == 'page-2' else [{{'id': '00000000-0000-0000-0000-000000000000'}}]\n"
+        "                next_cursor = None if params.get('cursor') == 'page-2' else 'page-2'\n"
+        "            else:\n"
+        f"                data = [{{'id': {THREAD_ID!r}}}] if params.get('archived') and session_state == 'archived' else []\n"
+        "                next_cursor = None\n"
+        "            response = {'id': request_id, 'result': {'data': data, 'nextCursor': next_cursor}}\n"
+        "        elif method == 'thread/loaded/list':\n"
+        f"            count_path = Path({str(check_count)!r})\n"
+        "            count = int(count_path.read_text()) if count_path.exists() else 0\n"
+        "            count_path.write_text(str(count + 1))\n"
+        f"            checks = {checks!r}\n"
+        "            loaded = checks[min(count, len(checks) - 1)]\n"
+        f"            response = {{'id': request_id, 'result': {{'data': [{THREAD_ID!r}] if loaded else []}}}}\n"
+        "        else:\n"
+        "            continue\n"
+        "        print(json.dumps(response), flush=True)\n"
         "    raise SystemExit(0)\n"
         f"{body}\n",
     )
@@ -304,6 +339,56 @@ def test_missing_session_is_rejected_before_trigger(tmp_path: Path) -> None:
     assert not (task_dir / "trigger-ran").exists()
 
 
+def test_state_db_only_session_is_accepted(tmp_path: Path) -> None:
+    _, config = _task(tmp_path, "exit 0")
+    codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
+    codex_home = tmp_path / "state-only-codex-home"
+    codex_home.mkdir()
+    (codex_home / "fake-state-db-status").write_text("active", encoding="utf-8")
+
+    assert _run(config, codex, codex_home=str(codex_home)) == EXIT_OK
+
+
+def test_state_db_archived_session_is_rejected_before_trigger(tmp_path: Path) -> None:
+    task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0")
+    codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
+    codex_home = tmp_path / "state-archived-codex-home"
+    codex_home.mkdir()
+    (codex_home / "session_index.jsonl").write_text(
+        json.dumps({"id": THREAD_ID}) + "\n", encoding="utf-8"
+    )
+    (codex_home / "fake-state-db-status").write_text("archived", encoding="utf-8")
+
+    with pytest.raises(RunnerSetupError, match="session is archived"):
+        _run(config, codex, codex_home=str(codex_home))
+    assert not (task_dir / "trigger-ran").exists()
+
+
+def test_state_db_archived_lookup_follows_pagination(tmp_path: Path) -> None:
+    task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0")
+    codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
+    codex_home = tmp_path / "state-archived-paginated-codex-home"
+    codex_home.mkdir()
+    (codex_home / "fake-state-db-status").write_text("archived-page-2", encoding="utf-8")
+
+    with pytest.raises(RunnerSetupError, match="session is archived"):
+        _run(config, codex, codex_home=str(codex_home))
+    assert not (task_dir / "trigger-ran").exists()
+
+
+def test_legacy_session_is_accepted_when_absent_from_state_db(tmp_path: Path) -> None:
+    _, config = _task(tmp_path, "exit 0")
+    codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
+    codex_home = tmp_path / "legacy-only-codex-home"
+    codex_home.mkdir()
+    (codex_home / "session_index.jsonl").write_text(
+        json.dumps({"id": THREAD_ID}) + "\n", encoding="utf-8"
+    )
+    (codex_home / "fake-state-db-status").write_text("missing", encoding="utf-8")
+
+    assert _run(config, codex, codex_home=str(codex_home)) == EXIT_OK
+
+
 def test_archived_session_is_rejected_before_trigger(tmp_path: Path) -> None:
     task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
@@ -374,6 +459,7 @@ def test_session_unloaded_after_trigger_is_not_queued(tmp_path: Path) -> None:
         "Error: session is archived",
         "Error: thread is not loaded",
         "Error: session not found",
+        "Error: failed to read thread: no rollout found for thread id",
     ],
 )
 def test_queue_target_rejection_is_permanent_setup_error(tmp_path: Path, error: str) -> None:
