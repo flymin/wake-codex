@@ -73,7 +73,8 @@ wake-codex cancel TASK_ID
 
 `submit` 注册后立即返回 task ID 和下次检查时间。ID 可以使用不歧义的 UUID 前缀；名称
 也可用于 `show/events/cancel`，但重复名称需要改用 ID。`list` 默认只显示 active task，
-`--all` 包含终态。
+`--all` 包含终态。数据库和 `--json` 输出中的时间使用 UTC；人类可读的 `submit`、
+`list`、`show` 会按各 task 配置的时区显示下次检查时间，并带明确的 UTC offset。
 
 daemon 默认最多并行执行 4 个不同 task，同一 task 永不重叠。可用
 `--max-workers`、`--command-timeout` 和 `--retry-interval` 调整。cron 漏跑不会逐次补跑：

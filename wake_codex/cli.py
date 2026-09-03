@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from wake_codex.config import ConfigError, load_task_config
 from wake_codex.daemon import DaemonError, run_daemon
@@ -264,15 +265,31 @@ def _print_json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def _format_task_timestamp(value: object, timezone_name: object) -> str:
+    if not value:
+        return "-"
+    if not isinstance(value, str) or not isinstance(timezone_name, str):
+        return str(value)
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return value
+        return parsed.astimezone(ZoneInfo(timezone_name)).isoformat(timespec="seconds")
+    except (ValueError, OSError, ZoneInfoNotFoundError):
+        return value
+
+
 def _print_tasks(tasks: list[dict[str, Any]]) -> None:
     if not tasks:
         print("No tasks.")
         return
-    print(f"{'ID':8}  {'STATUS':10}  {'NEXT RUN':25}  NAME")
+    print(f"{'ID':8}  {'STATUS':10}  {'NEXT RUN':25}  {'TIMEZONE':20}  NAME")
     for task in tasks:
+        timezone_name = task.get("timezone") or "-"
+        next_run = _format_task_timestamp(task.get("next_run_at"), timezone_name)
         print(
             f"{task['id'][:8]:8}  {task['status'][:10]:10}  "
-            f"{(task.get('next_run_at') or '-')[:25]:25}  {task['name']}"
+            f"{next_run:25}  {str(timezone_name):20}  {task['name']}"
         )
 
 
@@ -338,7 +355,8 @@ def _daemon_request(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         _print_json(result)
     elif args.command == "submit":
-        print(f"Submitted {result['id']} ({result['name']}), next run {result['next_run_at']}")
+        next_run = _format_task_timestamp(result.get("next_run_at"), result.get("timezone"))
+        print(f"Submitted {result['id']} ({result['name']}), next run {next_run}")
     elif args.command == "list":
         _print_tasks(result)
     elif args.command == "show":
@@ -347,7 +365,8 @@ def _daemon_request(args: argparse.Namespace) -> int:
             f"folder: {result['task_dir']}\nthread: {result['thread_id']}\n"
             f"schedule: {result['schedule']} ({result['timezone']})\n"
             f"lifecycle: {result['lifecycle']}  mode: {result['mode']}\n"
-            f"next run: {result.get('next_run_at') or '-'}  deliveries: {result['delivery_count']}"
+            f"next run: {_format_task_timestamp(result.get('next_run_at'), result.get('timezone'))}  "
+            f"deliveries: {result['delivery_count']}"
         )
         if result.get("last_error"):
             print(f"last error: {result['last_error']}")

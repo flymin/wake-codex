@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from wake_codex.cli import main
+from wake_codex.cli import _print_json, _print_tasks, main
 from wake_codex.daemon import ActiveRun, WakeDaemon
 from wake_codex.daemon_paths import socket_path
 from wake_codex.daemon_store import DaemonStore
@@ -318,6 +318,33 @@ def test_recovery_and_output_purge_preserve_metadata(tmp_path: Path) -> None:
 def test_daemon_cli_fails_cleanly_when_unavailable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "--state-dir", str(tmp_path / "absent")]) == EXIT_SETUP
     assert "cannot contact wake-codex daemon" in capsys.readouterr().err
+
+
+def test_human_task_list_uses_configured_timezone(capsys: pytest.CaptureFixture[str]) -> None:
+    task = {
+        "id": THREAD_ID,
+        "status": "scheduled",
+        "next_run_at": "2026-01-01T01:00:00.123456+00:00",
+        "timezone": "Asia/Shanghai",
+        "name": "timezone-test",
+    }
+
+    _print_tasks([task, {**task, "id": "terminal", "status": "delivered", "next_run_at": None}])
+
+    output = capsys.readouterr().out
+    assert "TIMEZONE" in output
+    assert "2026-01-01T09:00:00+08:00" in output
+    assert "Asia/Shanghai" in output
+    assert "2026-01-01T01:00:00.123456+00:00" not in output
+    assert "delivered   -" in output
+
+
+def test_json_task_timestamp_remains_canonical_utc(capsys: pytest.CaptureFixture[str]) -> None:
+    timestamp = "2026-01-01T01:00:00.123456+00:00"
+
+    _print_json([{"next_run_at": timestamp, "timezone": "Asia/Shanghai"}])
+
+    assert json.loads(capsys.readouterr().out)[0]["next_run_at"] == timestamp
 
 
 def test_daemon_socket_submit_schedule_and_list(tmp_path: Path) -> None:
