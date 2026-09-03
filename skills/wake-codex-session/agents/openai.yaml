@@ -1,4 +1,4 @@
 interface:
   display_name: "Wake Codex Session"
-  short_description: "Resume a Codex session when a condition is met"
-  default_prompt: "Use $wake-codex-session with session ID SESSION_ID to resume it after the background condition is satisfied."
+  short_description: "Resume this Codex session when a durable condition resolves"
+  default_prompt: "Use $wake-codex-session with this main session's current CODEX_THREAD_ID to queue a short reminder to continue the original unfinished task when the durable condition resolves."
