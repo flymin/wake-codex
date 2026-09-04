@@ -1,6 +1,6 @@
 ---
 name: wake-codex-session
-description: Schedule the main Codex session to resume itself through wake-codex after a long-running external condition becomes ready, using the local daemon when available and a Codex-managed foreground one-shot shell otherwise. Use only from the main agent when Codex should stop the current turn while waiting for a scheduler job, download, detached program, service, artifact, or other durable condition, then queue a short resume marker that makes the same main session continue its original unfinished work. Side sessions and subagents must hand the request to the main agent without creating or starting a wake task. If the user explicitly invokes wake-codex-session, require a session ID that exactly matches the main session's current CODEX_THREAD_ID.
+description: Schedule a Codex session to resume through wake-codex after a long-running external condition becomes ready, using the local daemon when available and a Codex-managed foreground one-shot shell otherwise. Use only from the main agent when Codex should stop the current turn while waiting for a scheduler job, download, detached program, service, artifact, or other durable condition, then queue a short resume marker that makes the target session continue its original unfinished work. Use a session ID supplied by the user, even when it differs from the current session; otherwise use the main agent's current CODEX_THREAD_ID without asking. Side sessions and subagents must hand the request to the main agent without creating or starting a wake task.
 ---
 
 # Wake Codex Session
@@ -27,23 +27,21 @@ When running in a side session or subagent:
 3. Ask the main agent to perform the complete workflow and stop. If no supported handoff channel is
    available, report that the wake must be scheduled by the main agent; do not improvise locally.
 
-The main agent must independently validate all supplied details, target only its own current
-session, construct the task, and start the selected monitoring path.
+The main agent must independently validate all supplied details, select the target session by the
+rule below, construct the task, and start the selected monitoring path.
 
 ## Select The Target Session
 
-Require the main agent's current `CODEX_THREAD_ID` and validate that it is a canonical UUID. Use it
-as `TARGET_SESSION_ID`; no other target is permitted.
+Select exactly one `TARGET_SESSION_ID` without asking the user to supply or repeat an ID:
 
-- Treat `$wake-codex-session` or an unambiguous request to use the named `wake-codex-session` skill
-  as explicit invocation. Require a canonical session ID in the user's request. If it is absent,
-  ask the user for it and stop. If it does not exactly equal `CODEX_THREAD_ID`, reject it; do not
-  schedule a wake for another session.
-- Treat automatic selection based only on waiting/resume intent as implicit invocation. Use the
-  main agent's `CODEX_THREAD_ID` without asking the user to repeat it.
+1. If the user's request contains a session ID, use it even when it differs from the main agent's
+   current session.
+2. Otherwise use the main agent's current `CODEX_THREAD_ID`.
 
-If the main agent's `CODEX_THREAD_ID` is absent or invalid, stop without guessing from transcripts,
-process state, recent sessions, or a side/subagent thread.
+Require the selected value to be a canonical UUID. Reject an invalid user-supplied ID without
+silently replacing it. If no ID was supplied and `CODEX_THREAD_ID` is absent or invalid, stop
+without guessing from transcripts, process state, recent sessions, or a side/subagent thread.
+Record whether `TARGET_SESSION_ID` equals `CODEX_THREAD_ID` as `TARGET_IS_CURRENT`.
 
 ## Invariants
 
@@ -52,9 +50,10 @@ process state, recent sessions, or a side/subagent thread.
 - Ensure the monitored workload survives this turn independently. Scheduler jobs, services, and
   properly detached processes qualify. A subprocess tied to an active tool call does not.
 - Default to a ten-minute check cadence, `lifecycle: once`, and `mode: queue-only`.
-- Do not independently check whether the target session is loaded. The target is always the current
-  main session, so ending the agent turn is sufficient. Never archive/delete the thread, exit the
-  TUI, or kill its Codex process.
+- Do not independently check whether the target session is loaded. When `TARGET_IS_CURRENT` is true,
+  ending the agent turn is sufficient; never archive/delete the thread, exit the TUI, or kill its
+  Codex process. When it is false, the user is responsible for keeping the target loaded by a Codex
+  TUI/CLI/app-server process.
 - Let wake-codex call `codex queue`; do not call it directly.
 - Never use `nohup`, `setsid`, shell `&`, or another self-detaching launch for the fallback. Keep
   wake-codex in the foreground of the managed shell so its lifetime and output remain attached to
@@ -221,7 +220,10 @@ After successful daemon submission or managed-shell startup:
 
 1. Report the selected path, task ID or managed shell handle, absolute task folder, monitored
    condition, and effective schedule or poll interval.
-2. Stop all further polling and work on the original task.
-3. End the agent turn with the short handoff. Do not run `exit`, close Codex, archive the thread, or
+2. When `TARGET_IS_CURRENT` is false, remind the user that the target Codex process/thread must
+   remain loaded; otherwise the queued message waits until `codex resume <TARGET_SESSION_ID>` loads
+   it again. Do not perform an additional liveness check.
+3. Stop all further polling and work on the original task.
+4. End the agent turn with the short handoff. Do not run `exit`, close Codex, archive the thread, or
    wait for the trigger. For the managed-shell path, intentionally leave its foreground wake-codex
    command running across turns.
