@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import io
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,25 @@ def test_once_task_delivers_and_retains_output(tmp_path: Path) -> None:
         assert [event["status"] for event in events] == ["ok", "ok"]
         assert daemon.store.read_artifact(events[0]["stdout_path"]).strip() == "queued"
         assert (tmp_path / "queue-calls").read_text() == "1"
+    finally:
+        _close(daemon)
+
+
+def test_restore_locks_rejects_task_with_missing_directory(tmp_path: Path) -> None:
+    daemon = _daemon(tmp_path)
+    task_dir = _task(tmp_path)
+    task = daemon._submit(str(task_dir), False)
+    # Simulate cleanup of a temporary task directory while its DB row remains.
+    for lock in daemon.locks.values():
+        lock.close()
+    daemon.locks.clear()
+    shutil.rmtree(task_dir)
+    try:
+        daemon._restore_locks()
+        stored = daemon.store.get_task(task["id"])
+        assert stored["status"] == "rejected"
+        assert "task folder is unavailable" in stored["last_error"]
+        assert task["id"] not in daemon.locks
     finally:
         _close(daemon)
 

@@ -123,7 +123,21 @@ class WakeDaemon:
     def _restore_locks(self) -> None:
         for task in self.store.list_tasks():
             lock = TaskLock(Path(task["task_dir"]) / LOCK_FILENAME)
-            if lock.acquire():
+            try:
+                acquired = lock.acquire()
+            except OSError as exc:
+                # A task can outlive its working directory (for example after
+                # temporary storage cleanup).  Do not let one stale task
+                # prevent the daemon from starting; make it terminal instead.
+                self.store.update_task(
+                    task["id"],
+                    status="rejected",
+                    next_run_at=None,
+                    last_error=f"task folder is unavailable: {exc}",
+                )
+                lock.close()
+                continue
+            if acquired:
                 self.locks[task["id"]] = lock
             else:
                 self.store.update_task(
