@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -168,6 +169,46 @@ def test_restore_locks_rejects_task_with_missing_directory(tmp_path: Path) -> No
         _close(daemon)
 
 
+def test_store_migrates_continuous_trigger_as_edge(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with sqlite3.connect(state_dir / "state.sqlite3") as connection:
+        connection.execute(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, task_dir TEXT NOT NULL,
+                thread_id TEXT NOT NULL, trigger_path TEXT NOT NULL,
+                message_path TEXT NOT NULL, schedule TEXT NOT NULL,
+                timezone TEXT NOT NULL, lifecycle TEXT NOT NULL, mode TEXT NOT NULL,
+                status TEXT NOT NULL, armed INTEGER NOT NULL DEFAULT 1,
+                next_run_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                last_result TEXT, delivery_count INTEGER NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0, last_error TEXT
+            )
+            """
+        )
+        now = utc_now()
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                id, name, task_dir, thread_id, trigger_path, message_path,
+                schedule, timezone, lifecycle, mode, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy", "legacy", str(tmp_path / "task"), THREAD_ID,
+                str(tmp_path / "trigger"), str(tmp_path / "message"),
+                "* * * * *", "UTC", "continuous", "queue-only", "scheduled", now, now,
+            ),
+        )
+
+    store = DaemonStore(state_dir)
+    try:
+        assert store.get_task("legacy")["continuous_trigger"] == "edge"
+    finally:
+        store.close()
+
+
 def test_continuous_task_requires_block_to_rearm(tmp_path: Path) -> None:
     trigger = (
         "count=$(cat count 2>/dev/null || echo 0); count=$((count + 1)); echo $count > count; "
@@ -192,6 +233,34 @@ def test_continuous_task_requires_block_to_rearm(tmp_path: Path) -> None:
         ]
         assert "block" in trigger_statuses
         assert "error" not in trigger_statuses
+    finally:
+        _close(daemon)
+
+
+def test_continuous_always_delivers_on_every_go(tmp_path: Path) -> None:
+    daemon = _daemon(tmp_path)
+    task = daemon._submit(
+        str(
+            _task(
+                tmp_path,
+                "exit 0",
+                lifecycle="continuous",
+                continuous_trigger="always",
+            )
+        ),
+        False,
+    )
+    try:
+        async def scenario() -> None:
+            for _ in range(3):
+                await _execute(daemon, task["id"])
+
+        asyncio.run(scenario())
+        stored = daemon.store.get_task(task["id"])
+        assert stored["status"] == "scheduled"
+        assert stored["delivery_count"] == 3
+        assert stored["armed"] == 1
+        assert (tmp_path / "queue-calls").read_text() == "3"
     finally:
         _close(daemon)
 

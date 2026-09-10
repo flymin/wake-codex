@@ -49,6 +49,7 @@ class DaemonStore:
                 schedule TEXT NOT NULL,
                 timezone TEXT NOT NULL,
                 lifecycle TEXT NOT NULL,
+                continuous_trigger TEXT NOT NULL DEFAULT 'edge',
                 mode TEXT NOT NULL,
                 status TEXT NOT NULL,
                 armed INTEGER NOT NULL DEFAULT 1,
@@ -83,6 +84,13 @@ class DaemonStore:
             CREATE INDEX IF NOT EXISTS events_task_id ON events(task_id, id DESC);
             """
         )
+        columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "continuous_trigger" not in columns:
+            self.connection.execute(
+                "ALTER TABLE tasks ADD COLUMN continuous_trigger TEXT NOT NULL DEFAULT 'edge'"
+            )
         self.connection.commit()
 
     @staticmethod

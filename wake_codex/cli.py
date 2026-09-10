@@ -364,7 +364,8 @@ def _daemon_request(args: argparse.Namespace) -> int:
             f"{result['id']}  {result['status']}  {result['name']}\n"
             f"folder: {result['task_dir']}\nthread: {result['thread_id']}\n"
             f"schedule: {result['schedule']} ({result['timezone']})\n"
-            f"lifecycle: {result['lifecycle']}  mode: {result['mode']}\n"
+            f"lifecycle: {result['lifecycle']}  "
+            f"continuous trigger: {result['continuous_trigger']}  mode: {result['mode']}\n"
             f"next run: {_format_task_timestamp(result.get('next_run_at'), result.get('timezone'))}  "
             f"deliveries: {result['delivery_count']}"
         )

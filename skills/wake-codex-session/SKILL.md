@@ -5,10 +5,10 @@ description: Schedule a Codex session to resume through wake-codex after a long-
 
 # Wake Codex Session
 
-Create a new one-shot wake-codex task for the selected session. Prefer submitting it to a running
-daemon; when no daemon is reachable, run wake-codex in the foreground of a Codex-managed persistent
-shell. End the current agent turn after either path is confirmed active. Do not keep polling the
-condition from the agent after handoff.
+Create a wake-codex task for the selected session, using one-shot delivery by default. Prefer
+submitting it to a running daemon; when no daemon is reachable, run a one-shot wake in the foreground
+of a Codex-managed persistent shell. End the current agent turn after either path is confirmed
+active. Do not keep polling the condition from the agent after handoff.
 
 ## Main Agent Only
 
@@ -49,7 +49,10 @@ Record whether `TARGET_SESSION_ID` equals `CODEX_THREAD_ID` as `TARGET_IS_CURREN
   one-shot fallback when no daemon is running.
 - Ensure the monitored workload survives this turn independently. Scheduler jobs, services, and
   properly detached processes qualify. A subprocess tied to an active tool call does not.
-- Default to a ten-minute check cadence, `lifecycle: once`, and `mode: queue-only`.
+- Default to a ten-minute check cadence, `lifecycle: once`, and `mode: queue-only`. Only create a
+  recurring wake when the user explicitly requests one. For a recurring task, use
+  `lifecycle: continuous` and set `continuous_trigger: edge` when a block observation must rearm
+  delivery, or `continuous_trigger: always` when every trigger exit code `0` should deliver.
 - Do not independently check whether the target session is loaded. When `TARGET_IS_CURRENT` is true,
   ending the agent turn is sufficient; never archive/delete the thread, exit the TUI, or kill its
   Codex process. When it is false, the user is responsible for keeping the target loaded by a Codex
@@ -71,7 +74,8 @@ wake-codex list --json
 
 - If it succeeds, select the daemon path.
 - If it fails specifically because no daemon is reachable, select the managed-shell path. Do not
-  start a daemon merely for this task.
+  start a daemon merely for this task. The managed-shell runner cannot provide recurring delivery;
+  if the user requested a recurring task, report that a running daemon is required.
 - If wake-codex itself is missing, broken, or fails for another reason, diagnose or report the
   blocker instead of treating it as daemon absence.
 
@@ -139,6 +143,9 @@ mode: queue-only
 ```
 
 Replace the shown schedule and mode with `EFFECTIVE_SCHEDULE` and `EFFECTIVE_MODE`.
+For an explicitly requested recurring task, replace `lifecycle: once` with
+`lifecycle: continuous` and add the selected `continuous_trigger` value. Do not add
+`continuous_trigger` to a one-shot task.
 
 Construct `trigger.sh` with a shebang and executable permission. Prefer `set -uo pipefail`; use
 `set -e` only when normal waiting probes cannot be mistaken for shell failures. The script must be

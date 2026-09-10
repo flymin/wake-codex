@@ -92,6 +92,7 @@ def test_loads_daemon_schedule_fields(tmp_path: Path) -> None:
             "schedule: '*/5 * * * *'\n"
             "timezone: Asia/Shanghai\n"
             "lifecycle: continuous\n"
+            "continuous_trigger: always\n"
             "mode: strict\n"
         )
 
@@ -100,6 +101,7 @@ def test_loads_daemon_schedule_fields(tmp_path: Path) -> None:
     assert config.schedule == "*/5 * * * *"
     assert config.timezone == "Asia/Shanghai"
     assert config.lifecycle == "continuous"
+    assert config.continuous_trigger == "always"
     assert config.mode == "strict"
 
 
@@ -110,6 +112,8 @@ def test_loads_daemon_schedule_fields(tmp_path: Path) -> None:
         ("schedule: '* * * * * *'", "five"),
         ("timezone: Nowhere/Invalid", "timezone"),
         ("lifecycle: forever", "lifecycle"),
+        ("lifecycle: continuous\ncontinuous_trigger: repeated", "continuous_trigger"),
+        ("continuous_trigger: always", "only valid with lifecycle continuous"),
         ("mode: guessed", "mode"),
     ],
 )

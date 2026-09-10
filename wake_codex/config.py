@@ -20,6 +20,7 @@ SUPPORTED_FIELDS = {
     "schedule",
     "timezone",
     "lifecycle",
+    "continuous_trigger",
     "mode",
 }
 
@@ -39,6 +40,7 @@ class TaskConfig:
     schedule: str | None = None
     timezone: str | None = None
     lifecycle: str = "once"
+    continuous_trigger: str = "edge"
     mode: str = "queue-only"
 
 
@@ -133,6 +135,11 @@ def load_task_config(task_folder: str | os.PathLike[str]) -> TaskConfig:
     lifecycle = _optional_text(data, "lifecycle") or "once"
     if lifecycle not in {"once", "continuous"}:
         raise ConfigError("lifecycle must be once or continuous")
+    continuous_trigger = _optional_text(data, "continuous_trigger") or "edge"
+    if continuous_trigger not in {"edge", "always"}:
+        raise ConfigError("continuous_trigger must be edge or always")
+    if "continuous_trigger" in data and lifecycle != "continuous":
+        raise ConfigError("continuous_trigger is only valid with lifecycle continuous")
     mode = _optional_text(data, "mode") or "queue-only"
     if mode not in {"queue-only", "strict"}:
         raise ConfigError("mode must be queue-only or strict")
@@ -147,5 +154,6 @@ def load_task_config(task_folder: str | os.PathLike[str]) -> TaskConfig:
         schedule=schedule,
         timezone=timezone_name,
         lifecycle=lifecycle,
+        continuous_trigger=continuous_trigger,
         mode=mode,
     )

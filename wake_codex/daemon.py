@@ -201,13 +201,17 @@ class WakeDaemon:
                 self._schedule(task_id, "trigger-timeout", "trigger command timed out")
             elif result.returncode == 0:
                 self.store.update_task(task_id, last_result="go")
-                if task["lifecycle"] == "continuous" and not task["armed"]:
+                if (
+                    task["lifecycle"] == "continuous"
+                    and task["continuous_trigger"] == "edge"
+                    and not task["armed"]
+                ):
                     self._schedule(task_id, "go-disarmed", None)
                 else:
                     await self._deliver(task_id)
             elif result.returncode == 1:
                 values: dict[str, Any] = {}
-                if task["lifecycle"] == "continuous":
+                if task["lifecycle"] == "continuous" and task["continuous_trigger"] == "edge":
                     values["armed"] = 1
                 self._schedule(task_id, "block", None, **values)
             else:
@@ -308,7 +312,8 @@ class WakeDaemon:
             )
             count = int(task["delivery_count"]) + 1
             if task["lifecycle"] == "continuous":
-                self._schedule(task_id, "delivered", None, armed=0, delivery_count=count)
+                armed = 0 if task["continuous_trigger"] == "edge" else 1
+                self._schedule(task_id, "delivered", None, armed=armed, delivery_count=count)
             else:
                 self._terminal(task_id, "delivered", None, delivery_count=count)
             return
@@ -577,6 +582,7 @@ class WakeDaemon:
                     "schedule": config.schedule,
                     "timezone": timezone_name,
                     "lifecycle": config.lifecycle,
+                    "continuous_trigger": config.continuous_trigger,
                     "mode": config.mode,
                     "status": "retrying" if resuming_retry else "scheduled",
                     "next_run_at": utc_now()

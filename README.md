@@ -41,13 +41,25 @@ mode: queue-only
 `thread_id` 必须是小写 canonical UUID。
 
 daemon submit 要求五字段 `schedule`。`timezone` 是可选 IANA 时区，默认 daemon 所在机器
-的本地时区。`lifecycle` 默认为 `once`：queue 成功后结束；`continuous` 使用边沿触发：
-初始为 armed，go 只投递一次，此后必须实际观察到 block 才会重新 armed。
+的本地时区。`lifecycle` 默认为 `once`：queue 成功后结束。`continuous` 可通过
+`continuous_trigger` 选择重复触发语义：
+
+- `edge`（默认）：初始为 armed，go 只投递一次，此后必须实际观察到 block 才会重新
+  armed，适合状态条件。
+- `always`：每次 cron 检查返回 go（退出码 `0`）都投递，适合周期提醒或 trigger 自己
+  管理去重的任务。
+
+`continuous_trigger` 只能与 `lifecycle: continuous` 一起配置。例如：
+
+```yaml
+lifecycle: continuous
+continuous_trigger: always
+```
 
 task 通过目录引用注册。提交时冻结 YAML 中的名称、线程、schedule、时区、生命周期、
-模式以及 trigger/message 路径；修改这些字段后需要 cancel 并重新 submit。trigger 文件
-和 message 文件的内容在每次执行时重新读取，因此可以在 task 运行期间更新。消息正文
-不会写入 daemon 数据库或事件元数据。
+continuous trigger 策略、模式以及 trigger/message 路径；修改这些字段后需要 cancel 并
+重新 submit。trigger 文件和 message 文件的内容在每次执行时重新读取，因此可以在 task
+运行期间更新。消息正文不会写入 daemon 数据库或事件元数据。
 
 ## Daemon
 
