@@ -132,8 +132,9 @@ outcome, including launch failure and disappearance after a recorded start, to `
 resumed agent can then diagnose the missing status. Treat an unavailable or ambiguous supervisor
 answer as an error.
 
-Do not use final-file existence alone when partial files can appear early. For downloads, write a
-verified `.complete` or status record only after checksum/size validation. Wake on a recorded
+Do not use final-file existence alone when partial files can appear early. For downloads, publish a
+completion or status record after the workload-defined completeness predicate is met. Apply checksum
+or size checks only when the workload contract requires them. Wake on a recorded
 failure too; the queued message should tell Codex to inspect the exit code and log.
 
 ## Existing Process Without a Wrapper
@@ -150,8 +151,8 @@ Never make the trigger wait for the process. Each invocation should inspect and 
 
 ## Artifact Or Remote Condition
 
-Use a machine-readable readiness signal: a manifest flag, atomic sentinel, checksum, API status,
-or database state. Return `0` only when the complete predicate is true, `1` when it is definitely
+Use a machine-readable readiness signal such as a manifest flag, atomic sentinel, API status, or
+database state. Use a checksum only when required by the producer/consumer contract. Return `0` only when the complete predicate is true, `1` when it is definitely
 not true yet, and another code on authentication, parsing, transport, or schema errors. Bound all
 network calls with a timeout shorter than the daemon command timeout.
 

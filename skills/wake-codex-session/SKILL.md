@@ -1,236 +1,44 @@
 ---
 name: wake-codex-session
-description: Schedule a Codex session to resume through wake-codex after a long-running external condition becomes ready, using the local daemon when available and a Codex-managed foreground one-shot shell otherwise. Use only from the main agent when Codex should stop the current turn while waiting for a scheduler job, download, detached program, service, artifact, or other durable condition, then queue a short resume marker that makes the target session continue its original unfinished work. Use a session ID supplied by the user, even when it differs from the current session; otherwise use the main agent's current CODEX_THREAD_ID without asking. Side sessions and subagents must hand the request to the main agent without creating or starting a wake task.
+description: Schedule wake-codex to resume a Codex session when a durable external condition becomes ready, such as a scheduler job, download, detached program, service, artifact, or remote status. Use only from the main agent; side sessions and subagents must not invoke it.
 ---
 
 # Wake Codex Session
 
-Create a wake-codex task for the selected session, using one-shot delivery by default. Prefer
-submitting it to a running daemon; when no daemon is reachable, run a one-shot wake in the foreground
-of a Codex-managed persistent shell. End the current agent turn after either path is confirmed
-active. Do not keep polling the condition from the agent after handoff.
+Use this workflow only from the root, user-facing agent. It creates a durable task containing a bounded trigger and a short resume marker, then hands monitoring to either the running wake-codex daemon or a foreground managed shell. After a successful handoff, end the turn and do not poll.
 
-## Main Agent Only
+## Target and execution path
 
-Determine the execution context before selecting a target session or taking any task action. The
-main agent is the root, user-facing agent for the thread being resumed. Treat every delegated task,
-side session, subagent, or uncertain context as non-main. Only the main agent may use this workflow,
-and it must not delegate any step.
+Choose one target session: use a session ID explicitly supplied by the user, otherwise the main agent's `CODEX_THREAD_ID`. Validate it as a canonical UUID; never guess another ID.
 
-When running in a side session or subagent:
+Run `wake-codex list --json` before creating files. Success selects daemon submission. Use the managed-shell one-shot fallback only when it fails because no daemon is reachable. Missing/broken wake-codex or another failure is a blocker. The fallback cannot deliver recurring wakes; report that limitation if recurrence was requested.
 
-1. Do not inspect the daemon, use that session's `CODEX_THREAD_ID` as the default target, create task
-   files, execute the trigger, submit a task, or start a managed shell.
-2. Return or send a handoff to the main agent containing the requested wait condition, any explicit
-   session ID for validation, durable job/process/artifact identifiers, requested schedule or mode,
-   and a concise proposed continuation message. Never substitute the side/subagent session ID.
-3. Ask the main agent to perform the complete workflow and stop. If no supported handoff channel is
-   available, report that the wake must be scheduled by the main agent; do not improvise locally.
+Defaults are one-shot, `queue-only`, and a ten-minute cadence. Accept only `queue-only` or `strict`. Honor a valid requested cron on the daemon path. For the fallback, use an explicit positive poll interval; convert only `*/N * * * *` (where `N` divides 60) and `0 * * * *` to seconds. Do not silently approximate other cron expressions.
 
-The main agent must independently validate all supplied details, select the target session by the
-rule below, construct the task, and start the selected monitoring path.
+## Build the task
 
-## Select The Target Session
+Use a new private persistent directory under a user-specified root, or the standard wake-codex state directory. Use a purpose slug plus a timestamp or UUID; do not use an ephemeral directory, overwrite an existing task, or put secrets in names.
 
-Select exactly one `TARGET_SESSION_ID` without asking the user to supply or repeat an ID:
+Create `task.yaml`, executable `trigger.sh`, and `message.txt`. YAML should use the wake-codex task schema: `version`, `name`, `thread_id`, `trigger`, `message`, and the applicable schedule/lifecycle/mode fields. Let wake-codex apply defaults where supported. Recurring tasks require an explicit user request and `lifecycle: continuous` plus `continuous_trigger: edge` or `always`; omit that field for one-shot tasks.
 
-1. If the user's request contains a session ID, use it even when it differs from the main agent's
-   current session.
-2. Otherwise use the main agent's current `CODEX_THREAD_ID`.
+The trigger must be non-interactive, bounded, idempotent, and read-only with respect to the workload. Return `0` when the session needs attention (success or terminal failure), `1` when definitely still waiting, and another code when state is unavailable or ambiguous. Keep durable state outside stdout; use atomic result publication and a supervisor query where applicable. Read [trigger-patterns.md](references/trigger-patterns.md) for workload-specific checks. Do not embed credentials; use only an existing restricted credential source available to the runner.
 
-Require the selected value to be a canonical UUID. Reject an invalid user-supplied ID without
-silently replacing it. If no ID was supplied and `CODEX_THREAD_ID` is absent or invalid, stop
-without guessing from transcripts, process state, recent sessions, or a side/subagent thread.
-Record whether `TARGET_SESSION_ID` equals `CODEX_THREAD_ID` as `TARGET_IS_CURRENT`.
+`message.txt` is a resume marker, not a new plan. Keep this intent concise, preferably within three sentences and 400 Unicode characters:
 
-## Invariants
+> Resume the original task from where this wake was scheduled; re-read the preceding context or active goal and continue all unfinished work. Do not stop after only checking the wake condition.
 
-- Assume `wake-codex` is available on `PATH`. Prefer a reachable daemon, but allow the managed-shell
-  one-shot fallback when no daemon is running.
-- Ensure the monitored workload survives this turn independently. Scheduler jobs, services, and
-  properly detached processes qualify. A subprocess tied to an active tool call does not.
-- Default to a ten-minute check cadence, `lifecycle: once`, and `mode: queue-only`. Only create a
-  recurring wake when the user explicitly requests one. For a recurring task, use
-  `lifecycle: continuous` and set `continuous_trigger: edge` when a block observation must rearm
-  delivery, or `continuous_trigger: always` when every trigger exit code `0` should deliver.
-- Do not independently check whether the target session is loaded. When `TARGET_IS_CURRENT` is true,
-  ending the agent turn is sufficient; never archive/delete the thread, exit the TUI, or kill its
-  Codex process. When it is false, the user is responsible for keeping the target loaded by a Codex
-  TUI/CLI/app-server process.
-- Let wake-codex call `codex queue`; do not call it directly.
-- Never use `nohup`, `setsid`, shell `&`, or another self-detaching launch for the fallback. Keep
-  wake-codex in the foreground of the managed shell so its lifetime and output remain attached to
-  the Codex session.
+Optionally add one short condition and at most one durable reference.
 
-## Workflow
+## Validate and hand off
 
-### 1. Select the execution path
+Check that the trigger is executable and bounded, then run it once and capture its exact exit code: `0` means the condition is already ready, so continue the current task without handoff; `1` means waiting, so proceed to handoff; any other code or timeout requires fixing or reporting the blocker.
 
-Before creating task files, run:
-
-```bash
-wake-codex list --json
-```
-
-- If it succeeds, select the daemon path.
-- If it fails specifically because no daemon is reachable, select the managed-shell path. Do not
-  start a daemon merely for this task. The managed-shell runner cannot provide recurring delivery;
-  if the user requested a recurring task, report that a running daemon is required.
-- If wake-codex itself is missing, broken, or fails for another reason, diagnose or report the
-  blocker instead of treating it as daemon absence.
-
-Remember the selected path and report it in the final handoff.
-
-Define `EFFECTIVE_SCHEDULE`, `EFFECTIVE_MODE`, and `EFFECTIVE_POLL_INTERVAL` before constructing the
-task. Defaults are `*/10 * * * *`, `queue-only`, and `600` seconds. Accept only the supported modes
-`queue-only` and `strict`; reject any other requested mode before writing files.
-
-Never discard a requested cadence. On the daemon path, honor a valid requested cron expression. If
-the user supplies only an interval of `N` whole minutes, convert it to `*/N * * * *` only when
-`1 <= N < 60` and `N` divides 60; map exactly 60 minutes to `0 * * * *`. Otherwise obtain an explicit
-five-field cron expression. On the managed-shell path, honor an explicit positive interval. A
-`*/N * * * *` cron may use `N * 60` seconds under the same `1 <= N < 60` divisor rule, and
-`0 * * * *` may use `3600` seconds, with interval timing rather than wall-clock alignment. Do not
-approximate any other cron expression in one-shot mode; obtain an explicit interval if the daemon
-is unavailable.
-
-### 2. Define the wake condition
-
-Translate the requested wait into a short, deterministic check. A trigger exit code means:
-
-- `0`: the condition is resolved and this thread needs attention now;
-- `1`: the condition is definitely still waiting;
-- any other code: the check itself failed or cannot determine state reliably.
-
-Wake on terminal failure as well as success when monitoring a job, download, or program. Otherwise
-a failed workload could wait forever. Print concise trigger diagnostics, but do not rely on stdout
-for continuation state because it is not inserted into `message.txt`. Keep any state needed after
-wake-up in a durable external source or an atomically published terminal-result file.
-
-Read [references/trigger-patterns.md](references/trigger-patterns.md) when constructing checks for
-scheduler jobs, downloads, background processes, artifacts, or remote conditions.
-
-### 3. Choose a persistent task folder
-
-Create a new unique folder for every invocation. Use the first applicable root:
-
-1. the user's requested task root;
-2. `WAKE_CODEX_SESSION_TASKS_DIR`;
-3. `$WAKE_CODEX_HOME/session-tasks` when `WAKE_CODEX_HOME` is set;
-4. `$XDG_STATE_HOME/wake-codex/session-tasks` when `XDG_STATE_HOME` is set;
-5. `$HOME/.local/state/wake-codex/session-tasks`.
-
-Use a concise purpose slug plus a UTC timestamp or UUID. Do not use an ephemeral temporary
-directory, overwrite an existing folder, include secrets in its name, or place it in a tracked
-source directory. Create the task folder with mode `0700` where possible and retain its resolved
-absolute path for the final report.
-
-### 4. Construct all three task files
-
-Create `task.yaml`, `trigger.sh`, and `message.txt` inside the new folder.
-
-Use this YAML shape, substituting the canonical `TARGET_SESSION_ID` and a unique safe name:
-
-```yaml
-version: 1
-name: session-wake-PURPOSE-UNIQUE
-thread_id: TARGET_SESSION_ID
-trigger: trigger.sh
-message: message.txt
-schedule: "*/10 * * * *"
-lifecycle: once
-mode: queue-only
-```
-
-Replace the shown schedule and mode with `EFFECTIVE_SCHEDULE` and `EFFECTIVE_MODE`.
-For an explicitly requested recurring task, replace `lifecycle: once` with
-`lifecycle: continuous` and add the selected `continuous_trigger` value. Do not add
-`continuous_trigger` to a one-shot task.
-
-Construct `trigger.sh` with a shebang and executable permission. Prefer `set -uo pipefail`; use
-`set -e` only when normal waiting probes cannot be mistaken for shell failures. The script must be
-idempotent, non-interactive, bounded, and normally finish well within the daemon command timeout.
-It may update private observation state in its task folder but must not mutate the monitored work.
-
-Construct `message.txt` as a resume marker, not a new task specification or handoff summary. Start
-from this template, preserving the first two sentences or their faithful translation:
-
-```text
-Resume the original task from where this wake was scheduled; re-read the preceding context or active goal and continue all unfinished work. Do not stop after only checking the wake condition. Wake condition: CONDITION; evidence: REFERENCE.
-```
-
-The wake-condition sentence is optional. When useful, keep it to one short condition and at most one
-durable job, path, artifact, or service reference. The resume instruction is always the dominant
-content.
-
-Limit the message to three sentences and 400 Unicode characters, including its trailing newline.
-Do not restate the original objective, add a checklist or new plan, enumerate configurations or
-results, or turn trigger verification into the resumed task. The prior conversation or active goal
-already carries the original work. Keep the file editable until queue time.
-
-Do not embed credentials in any task file or command output. Remote checks may use only a
-pre-existing, access-restricted credential source that is confirmed available to the selected
-runner. If none is available, report a blocker.
-
-### 5. Validate before handoff
-
-Perform all of these checks:
-
-1. Validate shell syntax, paths, permissions, YAML fields, and the canonical target session ID.
-2. Verify that `message.txt` is non-empty, preserves the resume-first template semantics, contains
-   at most three sentences, and satisfies `test "$(wc -m < message.txt)" -le 400`. Shorten it before
-   continuing if any check fails.
-3. Execute the trigger once and capture its exact exit code without treating `1` as a shell/tool
-   failure.
-4. If it returns `1`, continue to the selected handoff path.
-5. If it returns `0`, do not schedule a redundant wake. The condition is already ready; continue
-   the original work in the current turn or report that no wait is needed.
-6. If it returns any other code or times out, fix the trigger or report the blocker. Do not submit
-   a broken task.
-
-Do not invoke the trigger through a long polling loop. The daemon or managed one-shot runner owns
-subsequent checks.
-
-### 6. Start monitoring and stop
-
-#### Daemon path
-
-Run exactly one normal registration after validation:
-
-```bash
-wake-codex submit ABSOLUTE_TASK_FOLDER
-```
-
-Do not use `--force` for a newly created session-wake task. Treat submission as successful only when
-the command exits successfully and returns a task ID/next-run confirmation. On failure, diagnose
-or report it; remain in the current turn because no wake is registered.
-
-#### Managed-shell path
-
-Start exactly one long-running command in a Codex-managed shell or PTY, with a short initial yield
-so the command remains running there while control returns to the agent:
+For the daemon, run one normal `wake-codex submit ABSOLUTE_TASK_FOLDER`; require successful output with a task ID or next-run confirmation. For the fallback, start exactly one foreground command in a Codex-managed shell:
 
 ```bash
 wake-codex --mode EFFECTIVE_MODE --poll-interval EFFECTIVE_POLL_INTERVAL --timeout -1 ABSOLUTE_TASK_FOLDER
 ```
 
-The YAML cron schedule does not drive one-shot mode; `--poll-interval` controls its cadence.
+Do not use `nohup`, `setsid`, shell `&`, direct `codex queue`, or a long polling loop. Treat fallback startup as successful once the command starts without a setup error; an immediately delivered wake is also success. Retain the shell handle when it remains running.
 
-Run wake-codex as the foreground process in that shell. Do not background it inside the shell and
-do not redirect away its terminal output. Treat startup as successful only after its output confirms
-session validation, monitoring startup, and an initial block result, and the managed command is
-still running. Retain the managed shell/session handle for later inspection. If it exits during
-startup, inspect its result: a completed delivery needs no wake task, while any failure must be
-diagnosed or reported in the current turn.
-
-After successful daemon submission or managed-shell startup:
-
-1. Report the selected path, task ID or managed shell handle, absolute task folder, monitored
-   condition, and effective schedule or poll interval.
-2. When `TARGET_IS_CURRENT` is false, remind the user that the target Codex process/thread must
-   remain loaded; otherwise the queued message waits until `codex resume <TARGET_SESSION_ID>` loads
-   it again. Do not perform an additional liveness check.
-3. Stop all further polling and work on the original task.
-4. End the agent turn with the short handoff. Do not run `exit`, close Codex, archive the thread, or
-   wait for the trigger. For the managed-shell path, intentionally leave its foreground wake-codex
-   command running across turns.
+Report the path, task ID or shell handle, task directory, condition, and effective cadence. If the target differs from the current session, tell the user the target thread must later be loaded by a Codex process (it may be resumed then); do not perform a liveness check. Then stop work and end the turn.
