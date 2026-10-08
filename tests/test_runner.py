@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import threading
+import uuid
 from pathlib import Path
 
 import pytest
@@ -123,6 +125,7 @@ def _run(config: TaskConfig, codex: Path, **overrides: object) -> int:
 
 
 def test_retries_trigger_errors_and_blocks_before_delivery(tmp_path: Path) -> None:
+    message = "Resume original task\n继续原任务。\n\nRead /tmp/result.json for details.\n"
     task_dir, config = _task(
         tmp_path,
         "count_file=trigger-count\n"
@@ -132,6 +135,7 @@ def test_retries_trigger_errors_and_blocks_before_delivery(tmp_path: Path) -> No
         "if [[ $count -eq 1 ]]; then exit 2; fi\n"
         "if [[ $count -eq 2 ]]; then exit 1; fi\n"
         "exit 0",
+        message=message,
     )
     calls = tmp_path / "calls.jsonl"
     codex = _codex(
@@ -142,12 +146,18 @@ def test_retries_trigger_errors_and_blocks_before_delivery(tmp_path: Path) -> No
 
     assert _run(config, codex) == EXIT_OK
     assert (task_dir / "trigger-count").read_text().strip() == "3"
+    state = json.loads((task_dir / STATE_FILENAME).read_text())
+    task_id = state["task_id"]
+    assert str(uuid.UUID(task_id)) == task_id
+    delivered = f"[wake-codex: test | {task_id[:8]}] {message}"
     assert json.loads(calls.read_text().splitlines()[0]) == [
         "--thread",
         THREAD_ID,
         "--message",
-        "prompt",
+        delivered,
     ]
+    assert state["message_sha256"] == hashlib.sha256(delivered.encode()).hexdigest()
+    assert (task_dir / "message.txt").read_text() == message
     assert not (tmp_path / "codex.loaded-check-count").exists()
 
 
@@ -176,13 +186,14 @@ def test_strict_checks_before_trigger_and_queue_and_uses_endpoint(tmp_path: Path
 
     assert _run(config, codex, mode="strict", silent=1) == EXIT_OK
     assert int((tmp_path / "codex.loaded-check-count").read_text()) == 2
+    state = json.loads((config.task_dir / STATE_FILENAME).read_text())
     assert json.loads(calls.read_text()) == [
         "--remote",
         "unix://",
         "--thread",
         THREAD_ID,
         "--message",
-        "prompt",
+        f"[wake-codex: test | {state['task_id'][:8]}] prompt",
     ]
 
 
@@ -259,8 +270,30 @@ def test_rereads_message_before_each_queue_retry(tmp_path: Path) -> None:
 
     assert _run(config, codex) == EXIT_OK
     recorded = [json.loads(line) for line in calls.read_text().splitlines()]
-    assert recorded[0][-1] == "first prompt\n"
-    assert recorded[1][-1] == "second prompt\n"
+    state = json.loads((task_dir / STATE_FILENAME).read_text())
+    prefix = f"[wake-codex: test | {state['task_id'][:8]}] "
+    assert recorded[0][-1] == prefix + "first prompt\n"
+    assert recorded[1][-1] == prefix + "second prompt\n"
+
+
+@pytest.mark.parametrize("task_id", [None, "d8f20e07-1234-4bcd-8abc-123456789abc"])
+def test_resumes_retry_with_persisted_or_legacy_task_id(tmp_path: Path, task_id: str | None) -> None:
+    task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0", message="Resume task\n继续。\n")
+    state = {"version": 1, "status": "retrying", "attempt": 1}
+    if task_id is not None:
+        state["task_id"] = task_id
+    (task_dir / STATE_FILENAME).write_text(json.dumps(state), encoding="utf-8")
+    calls = tmp_path / "calls"
+    codex = _codex(tmp_path / "codex", f"Path({str(calls)!r}).write_text(sys.argv[-1], encoding='utf-8')")
+
+    assert _run(config, codex) == EXIT_OK
+    stored = json.loads((task_dir / STATE_FILENAME).read_text())
+    assert str(uuid.UUID(stored["task_id"])) == stored["task_id"]
+    if task_id is not None:
+        assert stored["task_id"] == task_id
+    assert calls.read_text() == f"[wake-codex: test | {stored['task_id'][:8]}] Resume task\n继续。\n"
+    assert stored["attempt"] == 2
+    assert not (task_dir / "trigger-ran").exists()
 
 
 def test_completed_state_refuses_restart_and_force_resends(tmp_path: Path) -> None:
@@ -302,7 +335,8 @@ def test_waits_for_user_to_fill_empty_message(tmp_path: Path) -> None:
         assert _run(config, codex) == EXIT_OK
     finally:
         timer.join()
-    assert calls.read_text() == "ready prompt"
+    state = json.loads((task_dir / STATE_FILENAME).read_text())
+    assert calls.read_text() == f"[wake-codex: test | {state['task_id'][:8]}] ready prompt"
 
 
 def test_queue_timeout_leaves_ambiguous_sending_state(tmp_path: Path) -> None:

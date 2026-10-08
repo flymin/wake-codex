@@ -1,1 +1,2 @@
-Jobs finished.
+Slurm jobs finished
+Resume the original task from where this wake was scheduled; inspect the job results and continue all unfinished work.

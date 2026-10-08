@@ -24,6 +24,7 @@ from wake_codex.runner import (
     TaskLock,
     _base_state,
     _codex_env,
+    _format_message,
     _is_permanent_queue_error,
     _preflight_codex,
     _proxy_command,
@@ -273,6 +274,7 @@ class WakeDaemon:
         if message is None:
             self._schedule_retry(task_id, f"message unavailable: {error}")
             return
+        message = _format_message(task["name"], task_id, message)
         message_hash = hashlib.sha256(message.encode()).hexdigest()
         state_path = Path(task["task_dir"]) / STATE_FILENAME
         attempt = self._legacy_attempt(state_path) + 1
@@ -480,7 +482,7 @@ class WakeDaemon:
             trigger_path=Path(task["trigger_path"]),
             message_path=Path(task["message_path"]),
         )
-        return _base_state(config, status, attempt)
+        return _base_state(config, status, attempt, task_id=task["id"])
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:

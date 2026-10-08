@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -649,11 +650,18 @@ def _read_message(path: Path) -> tuple[str | None, str | None]:
     return message, None
 
 
-def _base_state(config: TaskConfig, status: str, attempt: int) -> dict[str, object]:
+def _format_message(name: str, task_id: str, message: str) -> str:
+    return f"[wake-codex: {name} | {task_id[:8]}] {message}"
+
+
+def _base_state(
+    config: TaskConfig, status: str, attempt: int, *, task_id: str
+) -> dict[str, object]:
     return {
         "version": 1,
         "status": status,
         "task": config.name,
+        "task_id": task_id,
         "thread_id": config.thread_id,
         "attempt": attempt,
     }
@@ -672,6 +680,7 @@ def _delivery_loop(
     command_timeout: float,
     deadline: float | None,
     initial_attempt: int,
+    task_id: str,
 ) -> int:
     attempt = initial_attempt
     while True:
@@ -705,9 +714,10 @@ def _delivery_loop(
                 raise
 
         attempt += 1
+        message = _format_message(config.name, task_id, message)
         message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
         sending_state = {
-            **_base_state(config, "sending", attempt),
+            **_base_state(config, "sending", attempt, task_id=task_id),
             "message_sha256": message_hash,
             "started_at": _timestamp(),
         }
@@ -735,7 +745,7 @@ def _delivery_loop(
             _write_state(
                 state_path,
                 {
-                    **_base_state(config, "delivered", attempt),
+                    **_base_state(config, "delivered", attempt, task_id=task_id),
                     "message_sha256": message_hash,
                     "delivered_at": _timestamp(),
                 },
@@ -756,7 +766,7 @@ def _delivery_loop(
             _write_state(
                 state_path,
                 {
-                    **_base_state(config, "rejected", attempt),
+                    **_base_state(config, "rejected", attempt, task_id=task_id),
                     "message_sha256": message_hash,
                     "last_returncode": result.returncode,
                     "reason": "target session was archived, not loaded, or not found",
@@ -769,7 +779,7 @@ def _delivery_loop(
         _write_state(
             state_path,
             {
-                **_base_state(config, "retrying", attempt),
+                **_base_state(config, "retrying", attempt, task_id=task_id),
                 "message_sha256": message_hash,
                 "last_returncode": result.returncode,
             },
@@ -843,6 +853,7 @@ def run_task(
             )
             state = None
 
+        task_id = str((state or {}).get("task_id") or uuid.uuid4())
         deadline = None if timeout == -1 else time.monotonic() + timeout
         if state and state["status"] == "retrying":
             log(
@@ -862,6 +873,7 @@ def run_task(
                 command_timeout=command_timeout,
                 deadline=deadline,
                 initial_attempt=int(state.get("attempt", 0)),
+                task_id=task_id,
             )
 
         poll_count = 0
@@ -918,6 +930,7 @@ def run_task(
                     command_timeout=command_timeout,
                     deadline=deadline,
                     initial_attempt=0,
+                    task_id=task_id,
                 )
             elif result.returncode == 1:
                 log(

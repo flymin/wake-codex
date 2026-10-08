@@ -23,9 +23,14 @@ Create `task.yaml`, executable `trigger.sh`, and `message.txt`. YAML should use 
 
 The trigger must be non-interactive, bounded, idempotent, and read-only with respect to the workload. Return `0` when the session needs attention (success or terminal failure), `1` when definitely still waiting, and another code when state is unavailable or ambiguous. Keep durable state outside stdout; use atomic result publication and a supervisor query where applicable. Read [trigger-patterns.md](references/trigger-patterns.md) for workload-specific checks. Do not embed credentials; use only an existing restricted credential source available to the runner.
 
-`message.txt` is a resume marker, not a new plan. Keep this intent concise, preferably within three sentences and 400 Unicode characters:
+Write `message.txt` with a summary of at most 10 words on the first line. Start the actual resume prompt on the second line. Do not write a wake-codex tag yourself: wake-codex automatically prepends `[wake-codex: TASK_NAME | TASK_ID_PREFIX] ` to the file contents, using the task name and the first eight characters of its task ID. The delivered first line is the tag followed by your summary.
 
-> Resume the original task from where this wake was scheduled; re-read the preceding context or active goal and continue all unfinished work. Do not stop after only checking the wake condition.
+Keep the body a concise resume marker, preferably within three sentences and 400 Unicode characters. For example:
+
+```text
+Resume original task after job completion
+Resume the original task from where this wake was scheduled; re-read the preceding context or active goal and continue all unfinished work. Do not stop after only checking the wake condition.
+```
 
 Optionally add one short condition and at most one durable reference.
 

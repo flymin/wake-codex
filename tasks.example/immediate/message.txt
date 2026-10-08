@@ -1,1 +1,2 @@
-Continue.
+Resume original task
+Resume the original task from where this wake was scheduled and continue all unfinished work.

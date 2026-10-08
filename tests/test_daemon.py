@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import shutil
@@ -15,7 +16,7 @@ from wake_codex.daemon import ActiveRun, WakeDaemon
 from wake_codex.daemon_paths import socket_path
 from wake_codex.daemon_store import DaemonStore
 from wake_codex.ipc import request
-from wake_codex.runner import EXIT_SETUP
+from wake_codex.runner import EXIT_SETUP, STATE_FILENAME
 from wake_codex.schedule import utc_now
 
 
@@ -32,6 +33,7 @@ def _fake_codex(tmp_path: Path, behavior: str = "success") -> Path:
     behavior_path = tmp_path / "behavior"
     behavior_path.write_text(behavior, encoding="utf-8")
     calls = tmp_path / "queue-calls"
+    messages = tmp_path / "queue-messages.jsonl"
     checks = tmp_path / "loaded-checks"
     return _executable(
         tmp_path / "codex",
@@ -68,6 +70,9 @@ def _fake_codex(tmp_path: Path, behavior: str = "success") -> Path:
         "    raise SystemExit(0)\n"
         f"p = Path({str(calls)!r})\n"
         "p.write_text(str((int(p.read_text()) if p.exists() else 0) + 1))\n"
+        f"with Path({str(messages)!r}).open('a', encoding='utf-8') as f:\n"
+        "    f.write(json.dumps(sys.argv[-1], ensure_ascii=False) + '\\n')\n"
+        "if behavior == 'retry': raise SystemExit(9)\n"
         "if behavior == 'timeout': time.sleep(30)\n"
         "if behavior == 'missing':\n    print('failed to read thread: no rollout found for thread id', file=sys.stderr)\n    raise SystemExit(2)\n"
         "print('queued')\n",
@@ -135,7 +140,10 @@ def _cli_output(arguments: list[str]) -> tuple[int, str]:
 
 def test_once_task_delivers_and_retains_output(tmp_path: Path) -> None:
     daemon = _daemon(tmp_path)
-    task = daemon._submit(str(_task(tmp_path)), False)
+    task_dir = _task(tmp_path)
+    message = "Resume original task\n继续原任务。\n\nRead /tmp/result.json for details.\n"
+    (task_dir / "message.txt").write_text(message, encoding="utf-8")
+    task = daemon._submit(str(task_dir), False)
     try:
         asyncio.run(_execute(daemon, task["id"]))
         stored = daemon.store.get_task(task["id"])
@@ -146,6 +154,36 @@ def test_once_task_delivers_and_retains_output(tmp_path: Path) -> None:
         assert [event["status"] for event in events] == ["ok", "ok"]
         assert daemon.store.read_artifact(events[0]["stdout_path"]).strip() == "queued"
         assert (tmp_path / "queue-calls").read_text() == "1"
+        delivered = f"[wake-codex: daemon-test | {task['id'][:8]}] {message}"
+        assert json.loads((tmp_path / "queue-messages.jsonl").read_text()) == delivered
+        state = json.loads((task_dir / STATE_FILENAME).read_text())
+        assert state["task_id"] == task["id"]
+        assert state["message_sha256"] == hashlib.sha256(delivered.encode()).hexdigest()
+        assert (task_dir / "message.txt").read_text() == message
+    finally:
+        _close(daemon)
+
+
+def test_queue_retry_keeps_tag_and_rereads_message(tmp_path: Path) -> None:
+    daemon = _daemon(tmp_path, behavior="retry")
+    task_dir = _task(tmp_path, trigger="echo ran >> trigger-count\nexit 0")
+    task = daemon._submit(str(task_dir), False)
+    try:
+        asyncio.run(_execute(daemon, task["id"]))
+        assert daemon.store.get_task(task["id"])["status"] == "retrying"
+        (tmp_path / "behavior").write_text("success")
+        message = "Updated summary\n继续原任务并读取更新后的结果。\n"
+        (task_dir / "message.txt").write_text(message, encoding="utf-8")
+        config_path = task_dir / "task.yaml"
+        config_path.write_text(config_path.read_text().replace("daemon-test", "edited-name"))
+
+        asyncio.run(_execute(daemon, task["id"]))
+
+        assert daemon.store.get_task(task["id"])["status"] == "delivered"
+        recorded = [json.loads(line) for line in (tmp_path / "queue-messages.jsonl").read_text().splitlines()]
+        prefix = f"[wake-codex: daemon-test | {task['id'][:8]}] "
+        assert recorded == [prefix + "test prompt", prefix + message]
+        assert (task_dir / "trigger-count").read_text().splitlines() == ["ran"]
     finally:
         _close(daemon)
 
