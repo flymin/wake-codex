@@ -41,7 +41,7 @@ mode: queue-only
 `thread_id` 必须是小写 canonical UUID。
 
 建议 `message.txt` 第一行写不超过 10 words 的 summary，从第二行开始写具体 prompt。
-投递时 wake-codex 自动拼接 `[wake-codex: TASK_NAME | TASK_ID前8位] `，然后原样附上
+投递时 wake-codex 自动拼接 `[wake-codex: TASK_NAME | TASK_ID前8位 | YYMMDD-HHMMSS] `，然后原样附上
 消息文件全文；无需手写 tag。例如，文件内容为：
 
 ```text
@@ -49,15 +49,17 @@ Resume formal training after job completion
 继续原任务，检查训练结果并完成剩余工作。
 ```
 
-task name 为 `bs-lr-formal-v38`、task ID 以 `d8f20e07` 开头时，实际投递为：
+task name 为 `bs-lr-formal-v38`、task ID 以 `d8f20e07` 开头，
+本机发送时间为 2026-10-08 13:45:06 时，实际投递为：
 
 ```text
-[wake-codex: bs-lr-formal-v38 | d8f20e07] Resume formal training after job completion
+[wake-codex: bs-lr-formal-v38 | d8f20e07 | 261008-134506] Resume formal training after job completion
 继续原任务，检查训练结果并完成剩余工作。
 ```
 
 daemon 使用注册时分配的 task ID；one-shot 自动生成 UUID，并保存到
-`.wake-codex-state.json` 的 `task_id`，在投递重试及重启恢复重试时复用。消息 SHA256
+`.wake-codex-state.json` 的 `task_id`，在投递重试及重启恢复重试时复用。
+tag 中的时间使用运行 wake-codex 的本机时区，每次投递尝试（包括重试）都会刷新。消息 SHA256
 对应包含 tag 的实际投递文本。第一行 summary 的长度是 skill 写作约定，程序不会截断正文。
 
 daemon submit 要求五字段 `schedule`。`timezone` 是可选 IANA 时区，默认 daemon 所在机器

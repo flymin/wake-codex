@@ -124,7 +124,7 @@ def _run(config: TaskConfig, codex: Path, **overrides: object) -> int:
     return run_task(config, **options)  # type: ignore[arg-type]
 
 
-def test_retries_trigger_errors_and_blocks_before_delivery(tmp_path: Path) -> None:
+def test_retries_trigger_errors_and_blocks_before_delivery(tmp_path: Path, message_time: str) -> None:
     message = "Resume original task\n继续原任务。\n\nRead /tmp/result.json for details.\n"
     task_dir, config = _task(
         tmp_path,
@@ -149,7 +149,7 @@ def test_retries_trigger_errors_and_blocks_before_delivery(tmp_path: Path) -> No
     state = json.loads((task_dir / STATE_FILENAME).read_text())
     task_id = state["task_id"]
     assert str(uuid.UUID(task_id)) == task_id
-    delivered = f"[wake-codex: test | {task_id[:8]}] {message}"
+    delivered = f"[wake-codex: test | {task_id[:8]} | {message_time}] {message}"
     assert json.loads(calls.read_text().splitlines()[0]) == [
         "--thread",
         THREAD_ID,
@@ -175,7 +175,7 @@ def test_default_queue_only_does_not_check_loaded_state(tmp_path: Path) -> None:
     assert not (tmp_path / "codex.loaded-check-count").exists()
 
 
-def test_strict_checks_before_trigger_and_queue_and_uses_endpoint(tmp_path: Path) -> None:
+def test_strict_checks_before_trigger_and_queue_and_uses_endpoint(tmp_path: Path, message_time: str) -> None:
     _, config = _task(tmp_path, "exit 0")
     calls = tmp_path / "queue-args.json"
     codex = _codex(
@@ -193,7 +193,7 @@ def test_strict_checks_before_trigger_and_queue_and_uses_endpoint(tmp_path: Path
         "--thread",
         THREAD_ID,
         "--message",
-        f"[wake-codex: test | {state['task_id'][:8]}] prompt",
+        f"[wake-codex: test | {state['task_id'][:8]} | {message_time}] prompt",
     ]
 
 
@@ -252,7 +252,7 @@ def test_silent_level_3_keeps_timeout_result(
     assert "overall timeout" in lines[0]
 
 
-def test_rereads_message_before_each_queue_retry(tmp_path: Path) -> None:
+def test_rereads_message_before_each_queue_retry(tmp_path: Path, message_time: str) -> None:
     task_dir, config = _task(tmp_path, "exit 0", message="first prompt\n")
     calls = tmp_path / "calls.jsonl"
     count = tmp_path / "codex-count"
@@ -271,13 +271,15 @@ def test_rereads_message_before_each_queue_retry(tmp_path: Path) -> None:
     assert _run(config, codex) == EXIT_OK
     recorded = [json.loads(line) for line in calls.read_text().splitlines()]
     state = json.loads((task_dir / STATE_FILENAME).read_text())
-    prefix = f"[wake-codex: test | {state['task_id'][:8]}] "
+    prefix = f"[wake-codex: test | {state['task_id'][:8]} | {message_time}] "
     assert recorded[0][-1] == prefix + "first prompt\n"
     assert recorded[1][-1] == prefix + "second prompt\n"
 
 
 @pytest.mark.parametrize("task_id", [None, "d8f20e07-1234-4bcd-8abc-123456789abc"])
-def test_resumes_retry_with_persisted_or_legacy_task_id(tmp_path: Path, task_id: str | None) -> None:
+def test_resumes_retry_with_persisted_or_legacy_task_id(
+    tmp_path: Path, task_id: str | None, message_time: str
+) -> None:
     task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0", message="Resume task\n继续。\n")
     state = {"version": 1, "status": "retrying", "attempt": 1}
     if task_id is not None:
@@ -291,7 +293,7 @@ def test_resumes_retry_with_persisted_or_legacy_task_id(tmp_path: Path, task_id:
     assert str(uuid.UUID(stored["task_id"])) == stored["task_id"]
     if task_id is not None:
         assert stored["task_id"] == task_id
-    assert calls.read_text() == f"[wake-codex: test | {stored['task_id'][:8]}] Resume task\n继续。\n"
+    assert calls.read_text() == f"[wake-codex: test | {stored['task_id'][:8]} | {message_time}] Resume task\n继续。\n"
     assert stored["attempt"] == 2
     assert not (task_dir / "trigger-ran").exists()
 
@@ -325,7 +327,7 @@ def test_timeout_while_trigger_blocks(tmp_path: Path) -> None:
     assert _run(config, codex, timeout=0.04) == EXIT_TIMEOUT
 
 
-def test_waits_for_user_to_fill_empty_message(tmp_path: Path) -> None:
+def test_waits_for_user_to_fill_empty_message(tmp_path: Path, message_time: str) -> None:
     task_dir, config = _task(tmp_path, "exit 0", message="")
     calls = tmp_path / "calls"
     codex = _codex(tmp_path / "codex", f"open({str(calls)!r}, 'w').write(sys.argv[-1])\n")
@@ -336,7 +338,7 @@ def test_waits_for_user_to_fill_empty_message(tmp_path: Path) -> None:
     finally:
         timer.join()
     state = json.loads((task_dir / STATE_FILENAME).read_text())
-    assert calls.read_text() == f"[wake-codex: test | {state['task_id'][:8]}] ready prompt"
+    assert calls.read_text() == f"[wake-codex: test | {state['task_id'][:8]} | {message_time}] ready prompt"
 
 
 def test_queue_timeout_leaves_ambiguous_sending_state(tmp_path: Path) -> None:

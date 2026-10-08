@@ -138,7 +138,7 @@ def _cli_output(arguments: list[str]) -> tuple[int, str]:
     return code, output.getvalue()
 
 
-def test_once_task_delivers_and_retains_output(tmp_path: Path) -> None:
+def test_once_task_delivers_and_retains_output(tmp_path: Path, message_time: str) -> None:
     daemon = _daemon(tmp_path)
     task_dir = _task(tmp_path)
     message = "Resume original task\n继续原任务。\n\nRead /tmp/result.json for details.\n"
@@ -154,7 +154,7 @@ def test_once_task_delivers_and_retains_output(tmp_path: Path) -> None:
         assert [event["status"] for event in events] == ["ok", "ok"]
         assert daemon.store.read_artifact(events[0]["stdout_path"]).strip() == "queued"
         assert (tmp_path / "queue-calls").read_text() == "1"
-        delivered = f"[wake-codex: daemon-test | {task['id'][:8]}] {message}"
+        delivered = f"[wake-codex: daemon-test | {task['id'][:8]} | {message_time}] {message}"
         assert json.loads((tmp_path / "queue-messages.jsonl").read_text()) == delivered
         state = json.loads((task_dir / STATE_FILENAME).read_text())
         assert state["task_id"] == task["id"]
@@ -164,7 +164,7 @@ def test_once_task_delivers_and_retains_output(tmp_path: Path) -> None:
         _close(daemon)
 
 
-def test_queue_retry_keeps_tag_and_rereads_message(tmp_path: Path) -> None:
+def test_queue_retry_keeps_tag_and_rereads_message(tmp_path: Path, message_time: str) -> None:
     daemon = _daemon(tmp_path, behavior="retry")
     task_dir = _task(tmp_path, trigger="echo ran >> trigger-count\nexit 0")
     task = daemon._submit(str(task_dir), False)
@@ -181,7 +181,7 @@ def test_queue_retry_keeps_tag_and_rereads_message(tmp_path: Path) -> None:
 
         assert daemon.store.get_task(task["id"])["status"] == "delivered"
         recorded = [json.loads(line) for line in (tmp_path / "queue-messages.jsonl").read_text().splitlines()]
-        prefix = f"[wake-codex: daemon-test | {task['id'][:8]}] "
+        prefix = f"[wake-codex: daemon-test | {task['id'][:8]} | {message_time}] "
         assert recorded == [prefix + "test prompt", prefix + message]
         assert (task_dir / "trigger-count").read_text().splitlines() == ["ran"]
     finally:

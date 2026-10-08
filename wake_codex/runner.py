@@ -651,7 +651,8 @@ def _read_message(path: Path) -> tuple[str | None, str | None]:
 
 
 def _format_message(name: str, task_id: str, message: str) -> str:
-    return f"[wake-codex: {name} | {task_id[:8]}] {message}"
+    timestamp = datetime.now(timezone.utc).astimezone().strftime("%y%m%d-%H%M%S")
+    return f"[wake-codex: {name} | {task_id[:8]} | {timestamp}] {message}"
 
 
 def _base_state(
