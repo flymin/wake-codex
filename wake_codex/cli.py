@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     one_shot.add_argument(
         "--codex-home",
         metavar="PATH",
-        help="Codex state directory used to validate the session (default: CODEX_HOME or ~/.codex)",
+        help="Codex home passed to queue and used for strict checks (default: CODEX_HOME or ~/.codex)",
     )
     one_shot.add_argument(
         "--app-server-endpoint",
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=("queue-only", "strict"),
         default="queue-only",
-        help="activity check mode (default: queue-only)",
+        help="queue-only skips session queries; strict checks the existing app-server (default: queue-only)",
     )
     one_shot.add_argument(
         "--silent",

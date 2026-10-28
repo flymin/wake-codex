@@ -5,8 +5,8 @@
 多个 cron task 的 foreground daemon。
 
 当前实现面向并测试于 **Codex CLI `0.151.0-alpha.7.2`**，不承诺兼容更早版本。
-session 预检同时支持该版本的 state DB/paginated thread metadata，以及仍在使用的
-`sessions/`、`archived_sessions/` 和 `session_index.jsonl` legacy 存储。
+strict 模式的 session 预检同时支持该版本的 state DB/paginated thread metadata，
+以及仍在使用的 `sessions/`、`archived_sessions/` 和 `session_index.jsonl` legacy 存储。
 
 ## 安装
 
@@ -135,8 +135,12 @@ systemctl --user status wake-codex.service
 
 ## 活跃检查
 
-`queue-only` 是默认模式，不调用 `thread/loaded/list`，兼容普通 Codex TUI。queue 成功
-只代表命令接受了消息；消息只有在目标会话存在活跃 Codex 进程时才会执行，否则需要
+`queue-only` 是默认模式，兼容普通 Codex TUI。wake-codex 在该模式下不启动或连接
+app-server，不查询 Codex 会话数据库，也不读取 `sessions/`、`archived_sessions/`
+或 `session_index.jsonl`；注册、恢复和轮询均跳过 session 检查。只检查配置和
+`codex queue --help` 支持，然后执行 trigger，并通过 `codex queue --thread … --message …`
+投递，不传 `--remote`。目标不存在或已归档等错误由 queue 命令在投递时报告。
+queue 成功只代表命令接受了消息；消息只有在目标会话存在活跃 Codex 进程时才会执行，否则需要
 运行 `codex resume <thread_id>`。one-shot runner 会打印这条 note，`--silent 1` 可隐藏。
 
 `strict` 在 trigger 前和 queue 前分别通过受支持的 `thread/loaded/list` 检查 loaded
@@ -144,11 +148,15 @@ systemctl --user status wake-codex.service
 失败都会 fail closed。检查和 queue 指向同一 endpoint，但 Codex 当前没有把两者合成
 原子操作的接口，二次检查后仍存在很短的关闭竞态；queue 自身的明确拒绝会覆盖该竞态。
 
-submit 始终先检查 session：通过 app-server `thread/read` 查询 state DB/paginated
-metadata，并分页查询 `thread/list` 的 archived state；同时检查 `sessions/`、
+只有 `strict` 在注册或启动 one-shot runner 时先检查 session：通过现有 app-server 的
+proxy 执行 `thread/read` 查询 state DB/paginated metadata，并分页查询 `thread/list`
+的 archived state；同时检查 `sessions/`、
 `archived_sessions/` 和 `session_index.jsonl`。任一来源确认 archived 都直接拒绝；
 state DB 和 legacy 来源均无法确认存在时判定 missing。两者都会在执行 trigger 前退出，
 不会成为离线投递目标。
+
+daemon 仍使用自己的 `state.sqlite3` 保存任务和事件；消息投递继续调用
+`codex queue`，其内部的持久化及日志行为由 Codex CLI 实现决定。
 
 ## 状态与故障语义
 

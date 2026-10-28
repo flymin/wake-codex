@@ -32,7 +32,7 @@ from wake_codex.runner import (
     _read_state,
     _resolve_codex,
     _resolve_codex_home,
-    _validate_session_exists,
+    _validate_strict_session_exists,
     _write_state,
 )
 from wake_codex.schedule import local_timezone_name, next_run_at, utc_now
@@ -549,17 +549,15 @@ class WakeDaemon:
         config = load_task_config(task_folder)
         if config.schedule is None:
             raise ConfigError("schedule is required for daemon submission")
-        _validate_session_exists(
-            self.codex,
-            self.codex_home,
-            self.endpoint,
-            config.mode,
-            config.thread_id,
-            config.task_dir,
-            self.command_timeout,
-        )
         if config.mode == "strict":
-            _proxy_command(self.codex, self.endpoint)
+            _validate_strict_session_exists(
+                self.codex,
+                self.codex_home,
+                self.endpoint,
+                config.thread_id,
+                config.task_dir,
+                self.command_timeout,
+            )
         state_path = config.task_dir / STATE_FILENAME
         state = _read_state(state_path)
         if state and state["status"] in {"delivered", "sending", "rejected"} and not force:

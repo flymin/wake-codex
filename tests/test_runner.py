@@ -58,7 +58,9 @@ def _codex(path: Path, body: str, *, loaded_checks: list[bool] | None = None) ->
         "from pathlib import Path\n"
         "if sys.argv[1:] == ['queue', '--help']:\n"
         "    raise SystemExit(0)\n"
-        "if len(sys.argv) >= 3 and sys.argv[1] == 'app-server' and sys.argv[2] in {'--stdio', 'proxy'}:\n"
+        "if sys.argv[1:3] == ['app-server', '--stdio']:\n"
+        "    raise SystemExit('wake-codex must not start an app-server')\n"
+        "if sys.argv[1:3] == ['app-server', 'proxy']:\n"
         "    home = Path(os.environ['CODEX_HOME'])\n"
         "    marker = home / 'fake-state-db-status'\n"
         "    if marker.exists():\n"
@@ -110,7 +112,7 @@ def _run(config: TaskConfig, codex: Path, **overrides: object) -> int:
     codex_home = config.task_dir.parent / "codex-home"
     codex_home.mkdir(exist_ok=True)
     session_index = codex_home / "session_index.jsonl"
-    if not session_index.exists():
+    if overrides.get("mode", "queue-only") == "strict" and not session_index.exists():
         session_index.write_text(json.dumps({"id": THREAD_ID}) + "\n", encoding="utf-8")
     options = {
         "codex_entry": str(codex),
@@ -173,6 +175,32 @@ def test_default_queue_only_does_not_check_loaded_state(tmp_path: Path) -> None:
     assert _run(config, codex, silent=1) == EXIT_OK
     assert calls.read_text().splitlines() == ["queue"]
     assert not (tmp_path / "codex.loaded-check-count").exists()
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_queue_only_skips_all_session_queries_including_retry_and_resume(
+    tmp_path: Path, queue_only_codex: tuple[Path, Path, Path, Path], resume: bool
+) -> None:
+    task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0")
+    codex, codex_home, calls, behavior = queue_only_codex
+    behavior.write_text("retry-once", encoding="utf-8")
+    if resume:
+        (task_dir / STATE_FILENAME).write_text(
+            json.dumps({"status": "retrying", "attempt": 1}), encoding="utf-8"
+        )
+
+    assert run_task(
+        config, codex_entry=str(codex), codex_home=str(codex_home),
+        app_server_endpoint="deliberately-invalid-and-unused", mode="queue-only",
+        poll_interval=0.01, timeout=2.0, command_timeout=1.0, force=False,
+    ) == EXIT_OK
+
+    commands = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert commands[0] == ["queue", "--help"]
+    assert len(commands) == 3
+    assert all(command[:3] == ["queue", "--thread", THREAD_ID] for command in commands[1:])
+    assert (task_dir / "trigger-ran").exists() is not resume
+    assert json.loads((task_dir / STATE_FILENAME).read_text())["status"] == "delivered"
 
 
 def test_strict_checks_before_trigger_and_queue_and_uses_endpoint(tmp_path: Path, message_time: str) -> None:
@@ -363,7 +391,7 @@ def test_task_lock_prevents_concurrent_runner(tmp_path: Path) -> None:
         os.close(lock_fd)
 
 
-def test_missing_session_is_rejected_before_trigger(tmp_path: Path) -> None:
+def test_strict_missing_session_is_rejected_before_trigger(tmp_path: Path) -> None:
     task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
     empty_home = tmp_path / "empty-codex-home"
@@ -371,21 +399,21 @@ def test_missing_session_is_rejected_before_trigger(tmp_path: Path) -> None:
     (empty_home / "session_index.jsonl").write_text("", encoding="utf-8")
 
     with pytest.raises(RunnerSetupError, match="session does not exist"):
-        _run(config, codex, codex_home=str(empty_home))
+        _run(config, codex, codex_home=str(empty_home), mode="strict")
     assert not (task_dir / "trigger-ran").exists()
 
 
-def test_state_db_only_session_is_accepted(tmp_path: Path) -> None:
+def test_strict_state_db_only_session_is_accepted(tmp_path: Path) -> None:
     _, config = _task(tmp_path, "exit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
     codex_home = tmp_path / "state-only-codex-home"
     codex_home.mkdir()
     (codex_home / "fake-state-db-status").write_text("active", encoding="utf-8")
 
-    assert _run(config, codex, codex_home=str(codex_home)) == EXIT_OK
+    assert _run(config, codex, codex_home=str(codex_home), mode="strict") == EXIT_OK
 
 
-def test_state_db_archived_session_is_rejected_before_trigger(tmp_path: Path) -> None:
+def test_strict_state_db_archived_session_is_rejected_before_trigger(tmp_path: Path) -> None:
     task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
     codex_home = tmp_path / "state-archived-codex-home"
@@ -396,11 +424,11 @@ def test_state_db_archived_session_is_rejected_before_trigger(tmp_path: Path) ->
     (codex_home / "fake-state-db-status").write_text("archived", encoding="utf-8")
 
     with pytest.raises(RunnerSetupError, match="session is archived"):
-        _run(config, codex, codex_home=str(codex_home))
+        _run(config, codex, codex_home=str(codex_home), mode="strict")
     assert not (task_dir / "trigger-ran").exists()
 
 
-def test_state_db_archived_lookup_follows_pagination(tmp_path: Path) -> None:
+def test_strict_state_db_archived_lookup_follows_pagination(tmp_path: Path) -> None:
     task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
     codex_home = tmp_path / "state-archived-paginated-codex-home"
@@ -408,11 +436,11 @@ def test_state_db_archived_lookup_follows_pagination(tmp_path: Path) -> None:
     (codex_home / "fake-state-db-status").write_text("archived-page-2", encoding="utf-8")
 
     with pytest.raises(RunnerSetupError, match="session is archived"):
-        _run(config, codex, codex_home=str(codex_home))
+        _run(config, codex, codex_home=str(codex_home), mode="strict")
     assert not (task_dir / "trigger-ran").exists()
 
 
-def test_legacy_session_is_accepted_when_absent_from_state_db(tmp_path: Path) -> None:
+def test_strict_legacy_session_is_accepted_when_absent_from_state_db(tmp_path: Path) -> None:
     _, config = _task(tmp_path, "exit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
     codex_home = tmp_path / "legacy-only-codex-home"
@@ -422,10 +450,10 @@ def test_legacy_session_is_accepted_when_absent_from_state_db(tmp_path: Path) ->
     )
     (codex_home / "fake-state-db-status").write_text("missing", encoding="utf-8")
 
-    assert _run(config, codex, codex_home=str(codex_home)) == EXIT_OK
+    assert _run(config, codex, codex_home=str(codex_home), mode="strict") == EXIT_OK
 
 
-def test_archived_session_is_rejected_before_trigger(tmp_path: Path) -> None:
+def test_strict_archived_session_is_rejected_before_trigger(tmp_path: Path) -> None:
     task_dir, config = _task(tmp_path, "touch trigger-ran\nexit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
     codex_home = tmp_path / "archived-codex-home"
@@ -437,12 +465,12 @@ def test_archived_session_is_rejected_before_trigger(tmp_path: Path) -> None:
     (archived_dir / f"rollout-test-{THREAD_ID}.jsonl").write_text("{}\n", encoding="utf-8")
 
     with pytest.raises(RunnerSetupError, match="session is archived"):
-        _run(config, codex, codex_home=str(codex_home))
+        _run(config, codex, codex_home=str(codex_home), mode="strict")
     assert not (task_dir / "trigger-ran").exists()
 
 
 @pytest.mark.parametrize("archived", [False, True], ids=["missing", "archived"])
-def test_cli_session_preflight_errors_exit_2(tmp_path: Path, archived: bool) -> None:
+def test_strict_cli_session_preflight_errors_exit_2(tmp_path: Path, archived: bool) -> None:
     task_dir, _ = _task(tmp_path, "touch trigger-ran\nexit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
     codex_home = tmp_path / "preflight-codex-home"
@@ -459,6 +487,8 @@ def test_cli_session_preflight_errors_exit_2(tmp_path: Path, archived: bool) -> 
             str(codex),
             "--codex-home",
             str(codex_home),
+            "--mode",
+            "strict",
         ]
     ) == EXIT_SETUP
     assert not (task_dir / "trigger-ran").exists()
@@ -514,7 +544,7 @@ def test_queue_target_rejection_is_permanent_setup_error(tmp_path: Path, error: 
     assert state["status"] == "rejected"
 
 
-def test_transcript_fallback_validates_session_without_index(tmp_path: Path) -> None:
+def test_strict_transcript_fallback_validates_session_without_index(tmp_path: Path) -> None:
     _, config = _task(tmp_path, "exit 0")
     codex = _codex(tmp_path / "codex", "raise SystemExit(0)")
     codex_home = tmp_path / "transcript-codex-home"
@@ -522,4 +552,4 @@ def test_transcript_fallback_validates_session_without_index(tmp_path: Path) -> 
     transcript_dir.mkdir(parents=True)
     (transcript_dir / f"rollout-test-{THREAD_ID}.jsonl").write_text("{}\n", encoding="utf-8")
 
-    assert _run(config, codex, codex_home=str(codex_home)) == EXIT_OK
+    assert _run(config, codex, codex_home=str(codex_home), mode="strict") == EXIT_OK

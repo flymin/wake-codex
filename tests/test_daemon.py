@@ -16,7 +16,7 @@ from wake_codex.daemon import ActiveRun, WakeDaemon
 from wake_codex.daemon_paths import socket_path
 from wake_codex.daemon_store import DaemonStore
 from wake_codex.ipc import request
-from wake_codex.runner import EXIT_SETUP, STATE_FILENAME
+from wake_codex.runner import EXIT_SETUP, STATE_FILENAME, RunnerSetupError
 from wake_codex.schedule import utc_now
 
 
@@ -42,7 +42,9 @@ def _fake_codex(tmp_path: Path, behavior: str = "success") -> Path:
         "from pathlib import Path\n"
         f"behavior = Path({str(behavior_path)!r}).read_text().strip()\n"
         "if sys.argv[1:] == ['queue', '--help']:\n    raise SystemExit(0)\n"
-        "if len(sys.argv) >= 3 and sys.argv[1] == 'app-server' and sys.argv[2] in {'--stdio', 'proxy'}:\n"
+        "if sys.argv[1:3] == ['app-server', '--stdio']:\n"
+        "    raise SystemExit('wake-codex must not start an app-server')\n"
+        "if sys.argv[1:3] == ['app-server', 'proxy']:\n"
         "    home = Path(os.environ['CODEX_HOME'])\n"
         f"    archived = any(home.joinpath('archived_sessions').rglob('*-{THREAD_ID}.jsonl'))\n"
         f"    active = (home / 'session_index.jsonl').exists() and {THREAD_ID!r} in (home / 'session_index.jsonl').read_text()\n"
@@ -184,6 +186,47 @@ def test_queue_retry_keeps_tag_and_rereads_message(tmp_path: Path, message_time:
         prefix = f"[wake-codex: daemon-test | {task['id'][:8]} | {message_time}] "
         assert recorded == [prefix + "test prompt", prefix + message]
         assert (task_dir / "trigger-count").read_text().splitlines() == ["ran"]
+    finally:
+        _close(daemon)
+
+
+@pytest.mark.parametrize("queue_behavior", ["success", "retry", "missing"])
+def test_queue_only_daemon_submit_restore_and_delivery_skip_session_queries(
+    tmp_path: Path, queue_only_codex: tuple[Path, Path, Path, Path], queue_behavior: str
+) -> None:
+    codex, codex_home, calls, behavior = queue_only_codex
+    daemon_options = dict(
+        state_dir=tmp_path / "state", codex_entry=str(codex), codex_home=str(codex_home),
+        app_server_endpoint="deliberately-invalid-and-unused", command_timeout=1.0,
+        retry_interval=0.01, max_workers=2, tick_interval=0.01,
+    )
+    daemon = WakeDaemon(**daemon_options)
+    task_dir = _task(tmp_path, trigger="echo ran >> trigger-count\nexit 0")
+    try:
+        task = daemon._submit(str(task_dir), False)
+        assert not calls.exists()  # Registration must not execute Codex at all.
+    finally:
+        _close(daemon)
+
+    # Restore an existing task in a new daemon instance, without session lookup.
+    daemon = WakeDaemon(**daemon_options)
+    try:
+        daemon.store.recover(utc_now())
+        daemon._restore_locks()
+        assert not calls.exists()
+        behavior.write_text(queue_behavior, encoding="utf-8")
+        asyncio.run(_execute(daemon, task["id"]))
+        expected = {"success": "delivered", "retry": "retrying", "missing": "rejected"}
+        assert daemon.store.get_task(task["id"])["status"] == expected[queue_behavior]
+        if queue_behavior == "retry":
+            behavior.write_text("success", encoding="utf-8")
+            asyncio.run(_execute(daemon, task["id"]))
+            assert daemon.store.get_task(task["id"])["status"] == "delivered"
+        assert (task_dir / "trigger-count").read_text().splitlines() == ["ran"]
+        commands = [json.loads(line) for line in calls.read_text().splitlines()]
+        assert len(commands) == (2 if queue_behavior == "retry" else 1)
+        assert all(command[:3] == ["queue", "--thread", THREAD_ID] for command in commands)
+        assert {event["kind"] for event in daemon.store.list_events(task["id"])} == {"trigger", "queue"}
     finally:
         _close(daemon)
 
@@ -353,6 +396,25 @@ def test_strict_checks_before_trigger_and_queue(tmp_path: Path) -> None:
         _close(daemon)
 
 
+@pytest.mark.parametrize("session_state", ["missing", "archived"])
+def test_strict_submit_still_rejects_invalid_sessions(tmp_path: Path, session_state: str) -> None:
+    daemon = _daemon(tmp_path)
+    task_dir = _task(tmp_path, "touch trigger-ran\nexit 0", mode="strict")
+    if session_state == "missing":
+        (daemon.codex_home / "session_index.jsonl").unlink()
+    else:
+        archived = daemon.codex_home / "archived_sessions"
+        archived.mkdir()
+        (archived / f"rollout-test-{THREAD_ID}.jsonl").write_text("{}\n", encoding="utf-8")
+    try:
+        with pytest.raises(RunnerSetupError, match="does not exist|is archived"):
+            daemon._submit(str(task_dir), False)
+        assert daemon.store.list_tasks(include_terminal=True) == []
+        assert not (task_dir / "trigger-ran").exists()
+    finally:
+        _close(daemon)
+
+
 def test_queue_permanent_rejection_is_terminal(tmp_path: Path) -> None:
     daemon = _daemon(tmp_path, "missing")
     task = daemon._submit(str(_task(tmp_path)), False)
@@ -474,8 +536,11 @@ def test_json_task_timestamp_remains_canonical_utc(capsys: pytest.CaptureFixture
     assert json.loads(capsys.readouterr().out)[0]["next_run_at"] == timestamp
 
 
-def test_daemon_socket_submit_schedule_and_list(tmp_path: Path) -> None:
+def test_daemon_socket_submit_schedule_and_list(
+    tmp_path: Path, queue_only_codex: tuple[Path, Path, Path, Path]
+) -> None:
     daemon = _daemon(tmp_path)
+    daemon.codex, daemon.codex_home, calls, _ = queue_only_codex
     task_dir = _task(tmp_path)
 
     async def scenario() -> None:
@@ -532,3 +597,7 @@ def test_daemon_socket_submit_schedule_and_list(tmp_path: Path) -> None:
             await serving
 
     asyncio.run(scenario())
+    commands = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert commands[0] == ["queue", "--help"]
+    assert len(commands) == 2
+    assert commands[1][:3] == ["queue", "--thread", THREAD_ID]

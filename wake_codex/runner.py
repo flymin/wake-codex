@@ -455,26 +455,21 @@ def _state_db_has_archived_thread(client: _AppServerClient, thread_id: str) -> b
         cursor = next_cursor
 
 
-def _validate_session_exists(
+def _validate_strict_session_exists(
     codex: Path,
     codex_home: Path,
     endpoint: str,
-    mode: str,
     thread_id: str,
     cwd: Path,
     timeout: float,
 ) -> None:
+    """Inspect session storage through an existing strict-mode app-server."""
     legacy_state, malformed_lines = _legacy_session_state(codex_home, thread_id)
     if legacy_state == "archived":
         raise RunnerSetupError(f"Codex session is archived and cannot receive queue messages: {thread_id}")
 
-    command = (
-        _proxy_command(codex, endpoint)
-        if mode == "strict"
-        else [str(codex), "app-server", "--stdio"]
-    )
     with _AppServerClient(
-        command,
+        _proxy_command(codex, endpoint),
         cwd=cwd,
         env=_codex_env(codex_home),
         timeout=timeout,
@@ -821,20 +816,20 @@ def run_task(
         config.task_dir,
         command_timeout,
     )
-    _validate_session_exists(
-        codex,
-        resolved_codex_home,
-        app_server_endpoint,
-        mode,
-        config.thread_id,
-        config.task_dir,
-        command_timeout,
-    )
-    log(
-        f"validated Codex session {config.thread_id} in state DB/legacy storage",
-        silent=silent,
-        hide_at=3,
-    )
+    if mode == "strict":
+        _validate_strict_session_exists(
+            codex,
+            resolved_codex_home,
+            app_server_endpoint,
+            config.thread_id,
+            config.task_dir,
+            command_timeout,
+        )
+        log(
+            f"validated Codex session {config.thread_id} in state DB/legacy storage",
+            silent=silent,
+            hide_at=3,
+        )
     state_path = config.task_dir / STATE_FILENAME
     lock = TaskLock(config.task_dir / LOCK_FILENAME)
     if not lock.acquire():
